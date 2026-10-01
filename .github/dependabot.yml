@@ -1,10 +1,17 @@
+# One weekly pull request per ecosystem, so updates arrive together instead of one PR per package.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
