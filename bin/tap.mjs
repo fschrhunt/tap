@@ -17,7 +17,7 @@ import {
   toMessage,
 } from "../src/mcp.mjs";
 
-const USAGE = `tap ${VERSION} — Every MCP server, behind two tools.
+const USAGE = `tap ${VERSION} — Less noise. Better agents.
 
   tap                      run the MCP server over stdio (what a harness spawns)
   tap list                 list configured integrations and their tool counts
