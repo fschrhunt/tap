@@ -23,7 +23,7 @@ function sandbox(t) {
     run: async (...args) => {
       try {
         return { status: 0, ...await execute(process.execPath, [bin, ...args], {
-          env: { ...process.env, TAP_CONFIG: config }, encoding: "utf8", timeout: 15_000,
+          env: { ...process.env, TAP_CONFIG: config, TAP_DEADLINE_MS: "500" }, encoding: "utf8", timeout: 15_000,
         }) };
       } catch (error) {
         if (typeof error.code !== "number") throw error;

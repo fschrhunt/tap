@@ -58,7 +58,9 @@ retried on a later search. tap uses the official MCP TypeScript SDK v2.
 
 ## Configuration
 
-The default config is `~/.tap/servers.json`. Set `TAP_CONFIG` to use another file.
+The default config is `~/.tap/servers.json`. Set `TAP_CONFIG` to use another file. A server that
+takes longer than 5 seconds to connect and list its tools is reported as unavailable for that
+search; `TAP_DEADLINE_MS` changes the limit.
 
 ```json
 {
