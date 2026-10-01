@@ -23,14 +23,32 @@ func TestMCP(t *testing.T) {
 		}
 		equal(t, init["protocolVersion"], "2025-11-25")
 	})
+	t.Run("MCP 2026-07-28 requests get the results that revision requires; older sessions do not", func(t *testing.T) {
+		h := start(t, nil)
+		meta := map[string]any{"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": map[string]any{}}
+		list := h.request("tools/list", map[string]any{"_meta": meta})
+		equal(t, list["resultType"], "complete")
+		equal(t, list["cacheScope"], "public")
+		if _, ok := list["ttlMs"].(float64); !ok {
+			t.Fatalf("no ttlMs: %v", list)
+		}
+		equal(t, h.request("tools/call", map[string]any{"_meta": meta, "name": "plugin_search", "arguments": map[string]any{}})["resultType"], "complete")
+		old := start(t, nil)
+		old.initialize()
+		if _, ok := old.request("tools/list", nil)["resultType"]; ok {
+			t.Fatal("resultType sent in a 2025-11-25 session")
+		}
+	})
 	t.Run("tap exposes exactly plugin_search and plugin_call", func(t *testing.T) {
 		h := start(t, nil)
 		h.initialize()
 		r := h.request("tools/list", nil)
 		tools := r["tools"].([]any)
-		equal(t, len(tools), 2)
-		equal(t, tools[0].(map[string]any)["name"], "plugin_search")
-		equal(t, tools[1].(map[string]any)["name"], "plugin_call")
+		names := map[string]bool{}
+		for _, tool := range tools {
+			names[tool.(map[string]any)["name"].(string)] = true
+		}
+		equal(t, names, map[string]bool{"plugin_search": true, "plugin_call": true})
 	})
 	t.Run("plugin_search with a query returns matching ids and input schemas", func(t *testing.T) {
 		h := start(t, nil)
@@ -130,7 +148,16 @@ func TestSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	equal(t, h.request("tools/list", nil), decode(t, string(b)))
+	// Compared by name: the order of tools carries no meaning, and the SDK adds fields such as ttlMs
+	// that tap does not decide.
+	byName := func(list map[string]any) map[string]any {
+		out := map[string]any{}
+		for _, tool := range list["tools"].([]any) {
+			out[tool.(map[string]any)["name"].(string)] = tool
+		}
+		return out
+	}
+	equal(t, byName(h.request("tools/list", nil)), byName(decode(t, string(b)).(map[string]any)))
 }
 
 // TestSearchLimit protects total-before-limit and the requested shortlist size.
@@ -260,17 +287,19 @@ func TestEmptyConfigEnvironment(t *testing.T) {
 	equal(t, string(out), filepath.Join(home, ".tap", "servers.json")+"\n")
 }
 
-// TestRichContent preserves content metadata and an explicit null structured result.
+// TestRichContent preserves content metadata; an explicit null structuredContent, which the spec does
+// not allow, is dropped.
 func TestRichContent(t *testing.T) {
 	h := start(t, map[string]any{"fixture": definition("--rich")})
 	h.initialize()
 	r := h.call("data", nil)
 	equal(t, r["content"], decode(t, `[{"type":"image","data":"AA==","mimeType":"image/png","annotations":{"audience":["user"]},"_meta":{"extra":true}}]`))
-	value, ok := r["structuredContent"]
-	if !ok || value != nil {
-		t.Fatalf("explicit null structuredContent lost: %v", r)
+	if _, ok := r["structuredContent"]; ok {
+		t.Fatalf("null structuredContent passed on: %v", r)
 	}
-	equal(t, r["isError"], false)
+	if r["isError"] == true {
+		t.Fatalf("a successful call reported as an error: %v", r)
+	}
 }
 
 // TestStreamableHTTP covers the HTTP transport with expanded headers and a bearer token.
