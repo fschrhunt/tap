@@ -1,0 +1,28 @@
+{
+  "name": "tap",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Every MCP server, behind two tools.",
+  "type": "module",
+  "bin": {
+    "tap": "./bin/tap.mjs"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.5.4"
+  },
+  "license": "MIT",
+  "author": "Fischer Hunt",
+  "repository": "github:fschrhunt/tap"
+}
