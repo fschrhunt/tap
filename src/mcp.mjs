@@ -17,7 +17,9 @@ export const CONFIG_PATH =
   process.env.TAP_CONFIG || join(homedir(), ".tap", "servers.json");
 
 const CACHE_TTL_MS = 60_000;
-const DEADLINE_MS = 5_000;
+// How long one server may take to connect and list its tools before a search reports it unavailable.
+// TAP_DEADLINE_MS overrides it, mainly so tests need not wait five seconds per slow server.
+const DEADLINE_MS = Number(process.env.TAP_DEADLINE_MS) || 5_000;
 
 // Return the config path fixed at process startup.
 export function configPath() {
@@ -139,7 +141,7 @@ async function withDeadline(operation) {
     return await Promise.race([
       operation(),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("server deadline exceeded (5000 ms)")), DEADLINE_MS);
+        timer = setTimeout(() => reject(new Error(`server deadline exceeded (${DEADLINE_MS} ms)`)), DEADLINE_MS);
       }),
     ]);
   } finally {

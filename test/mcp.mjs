@@ -17,7 +17,7 @@ function harness(t, servers = { fixture: definition() }) {
   const config = join(dir, "servers.json");
   writeFileSync(config, JSON.stringify({ servers }));
   const child = spawn(process.execPath, [bin], {
-    env: { ...process.env, TAP_CONFIG: config }, stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, TAP_CONFIG: config, TAP_DEADLINE_MS: "500" }, stdio: ["pipe", "pipe", "pipe"],
   });
   const waiters = new Map();
   let buffer = "";
@@ -167,9 +167,9 @@ for (const mode of ["connect", "list"]) {
     const started = performance.now();
     const result = await search(h, { query: "echo" });
     const elapsed = performance.now() - started;
-    assert.ok(elapsed >= 4_500 && elapsed < 8_000, `deadline took ${elapsed} ms`);
+    assert.ok(elapsed >= 450 && elapsed < 3_000, `deadline took ${elapsed} ms`);
     assert.equal(result.matches[0].id, "fixture.echo");
-    assert.deepEqual(result.unavailable, [{ server: "hung", error: "server deadline exceeded (5000 ms)" }]);
+    assert.deepEqual(result.unavailable, [{ server: "hung", error: "server deadline exceeded (500 ms)" }]);
   });
 }
 
