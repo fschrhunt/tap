@@ -1,5 +1,5 @@
 <h1 align="center">tap</h1>
-<p align="center">Every MCP server, behind two tools.</p>
+<p align="center">Less noise. Better agents.</p>
 <p align="center"><a href="https://github.com/fschrhunt/tap/actions/workflows/ci.yml"><img src="https://github.com/fschrhunt/tap/actions/workflows/ci.yml/badge.svg" alt="CI"></a></p>
 
 ## Install
