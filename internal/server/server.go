@@ -1,10 +1,11 @@
-// Package server exposes tap's two-tool MCP surface over stdio. Its middleware
-// retains the original schemas, validation messages and downstream result shapes.
+// Package server exposes tap's two-tool MCP surface over stdio. The SDK answers tools/list and
+// wraps every result, so tap follows whichever MCP revision each client speaks; tap supplies the
+// tools' definitions, argument checks, results and its two JSON-RPC refusals.
 package server
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"io"
 	"math"
 	"os"
@@ -20,64 +21,72 @@ import (
 const instructions = "MCP tools are reached lazily. Call plugin_search with a capability query to get matching tools as `server.tool` ids plus the input schema, then call one with plugin_call. Nothing else is loaded up front."
 const definitions = "[{\"name\":\"plugin_search\",\"title\":\"Search MCP integrations\",\"description\":\"Find the MCP tools available to you. With a query, returns matching tools with the `id`, input schema, and safety hints needed to call them, plus the total match count and any unreachable server. With no query, lists the configured integrations. Call a result with plugin_call.\",\"inputSchema\":{\"type\":\"object\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"query\":{\"description\":\"Capability to find. Omit to list the integrations instead.\",\"type\":\"string\"},\"limit\":{\"description\":\"Maximum tools to return. Defaults to 8.\",\"type\":\"integer\",\"minimum\":1,\"maximum\":25}}},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":true}},{\"name\":\"plugin_call\",\"title\":\"Call an MCP tool\",\"description\":\"Run a tool discovered with plugin_search. Pass its `id` and an arguments object matching the schema plugin_search returned.\",\"inputSchema\":{\"type\":\"object\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"tool\":{\"type\":\"string\",\"description\":\"Tool id from plugin_search, written as server.tool.\"},\"arguments\":{\"description\":\"Arguments for the tool, matching its input schema.\",\"type\":\"object\",\"propertyNames\":{\"type\":\"string\"},\"additionalProperties\":{}}},\"required\":[\"tool\"]}}]"
 
-// Serve runs until stdin closes; its caller closes all downstream connections.
+// Serve runs until stdin closes; its caller closes all downstream connections. The SDK answers
+// tools/list and wraps every result, so both follow whichever protocol revision each client speaks;
+// tap supplies the two tools' definitions, their argument checks and their results.
 func Serve(ctx context.Context, e *registry.Engine) error {
-	tools, _ := wire.Decode([]byte(definitions))
+	var tools []*mcp.Tool
+	if err := json.Unmarshal([]byte(definitions), &tools); err != nil {
+		return err
+	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "tap", Version: e.Version}, &mcp.ServerOptions{Instructions: instructions, Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
-	for _, t := range tools.([]any) {
-		o := t.(wire.Object)
-		s.AddTool(&mcp.Tool{Name: o.Get("name").(string), InputSchema: o.Get("inputSchema")}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return nil, fmt.Errorf("handled by surface middleware")
+	for _, tool := range tools {
+		name := tool.Name
+		s.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := wire.Object{}
+			if len(req.Params.Arguments) > 0 {
+				if v, err := wire.Decode(req.Params.Arguments); err == nil {
+					args, _ = v.(wire.Object)
+				}
+			}
+			if err := validate(name, args); err != "" {
+				return toolError("Input validation error: Invalid arguments for tool " + name + ": " + err), nil
+			}
+			return invoke(ctx, e, name, args), nil
 		})
 	}
+	// Two refusals keep tap's own JSON-RPC errors: an unknown tool, and arguments that are not an object.
 	s.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			switch method {
-			case "tools/list":
-				return &wire.Result{Value: wire.Object{{Name: "tools", Value: tools}}}, nil
-			case "tools/call":
-				p := req.GetParams().(*mcp.CallToolParamsRaw)
-				if p.Name != "plugin_search" && p.Name != "plugin_call" {
-					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Tool " + p.Name + " not found"}
-				}
-				args := wire.Object{}
-				if len(p.Arguments) > 0 {
-					v, err := wire.Decode(p.Arguments)
-					if err == nil {
-						if o, ok := v.(wire.Object); ok {
-							args = o
-						} else {
-							issues := []any{wire.Object{{Name: "expected", Value: "record"}, {Name: "code", Value: "invalid_type"}, {Name: "path", Value: []string{"params", "arguments"}}, {Name: "message", Value: "Invalid input: expected record, received " + kind(v, true)}}}
-							b, _ := wire.JSON(issues, true)
-							return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Invalid tools/call request: " + string(b)}
-						}
-					}
-				}
-				if err := validate(p.Name, args); err != "" {
-					return toolError("Input validation error: Invalid arguments for tool " + p.Name + ": " + err), nil
-				}
-				return invoke(ctx, e, p.Name, args), nil
-			default:
+			if method != "tools/call" {
 				return next(ctx, method, req)
 			}
+			p := req.GetParams().(*mcp.CallToolParamsRaw)
+			if p.Name != "plugin_search" && p.Name != "plugin_call" {
+				return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Tool " + p.Name + " not found"}
+			}
+			if len(p.Arguments) > 0 {
+				if v, err := wire.Decode(p.Arguments); err == nil {
+					if _, ok := v.(wire.Object); !ok {
+						issues := []any{wire.Object{{Name: "expected", Value: "record"}, {Name: "code", Value: "invalid_type"}, {Name: "path", Value: []string{"params", "arguments"}}, {Name: "message", Value: "Invalid input: expected record, received " + kind(v, true)}}}
+						b, _ := wire.JSON(issues, true)
+						return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Invalid tools/call request: " + string(b)}
+					}
+				}
+			}
+			return next(ctx, method, req)
 		}
 	})
 	return s.Run(ctx, &mcp.IOTransport{Reader: &shutdownReader{ReadCloser: os.Stdin, close: e.Close}, Writer: stdoutWriter{os.Stdout}})
 }
 
+// text is one text content item.
+func text(t string) []mcp.Content { return []mcp.Content{&mcp.TextContent{Text: t}} }
+
 // textResult returns a formatted catalog or search result as MCP text content.
-func textResult(value any) *wire.Result {
+func textResult(value any) *mcp.CallToolResult {
 	b, _ := wire.JSON(value, true)
-	return &wire.Result{Value: wire.Object{{Name: "content", Value: []any{wire.Object{{Name: "type", Value: "text"}, {Name: "text", Value: string(b)}}}}}}
+	return &mcp.CallToolResult{Content: text(string(b))}
 }
 
 // toolError reports a recoverable tool failure without a JSON-RPC failure.
-func toolError(message string) *wire.Result {
-	return &wire.Result{Value: wire.Object{{Name: "content", Value: []any{wire.Object{{Name: "type", Value: "text"}, {Name: "text", Value: message}}}}, {Name: "isError", Value: true}}}
+func toolError(message string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: text(message), IsError: true}
 }
 
-// invoke shapes tap's own results while passing downstream content through unchanged.
-func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Object) *wire.Result {
+// invoke runs plugin_search or plugin_call. A downstream result passes through as the SDK reads it:
+// its content, error flag and structured content.
+func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Object) *mcp.CallToolResult {
 	if name == "plugin_search" {
 		query, _ := args.Get("query").(string)
 		var out wire.Object
@@ -115,7 +124,12 @@ func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Obje
 	if result.Has("structuredContent") {
 		out.Set("structuredContent", result.Get("structuredContent"))
 	}
-	return &wire.Result{Value: out}
+	b, _ := wire.JSON(out, false)
+	var passed mcp.CallToolResult
+	if err := json.Unmarshal(b, &passed); err != nil {
+		return toolError(tool + " returned a result tap cannot read: " + err.Error())
+	}
+	return &passed
 }
 
 // kind returns Zod's type labels for validation messages.

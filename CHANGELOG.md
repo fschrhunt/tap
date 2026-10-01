@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Clients on MCP 2026-07-28 (current Claude Code) can list and call tap's tools again: the SDK now
+  builds those results, with `resultType`, `ttlMs` and `cacheScope`, instead of tap writing them
+  itself. Tools are listed by name, and a downstream `structuredContent: null` is no longer passed on.
 - Rewritten in Go with the official MCP Go SDK: one binary, no Node runtime needed for tap.
   Release archives for Linux and macOS on amd64 and arm64, plus `go install` and source builds.
   The two tools, downstream transports, config format and CLI remain compatible.
