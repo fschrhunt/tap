@@ -8,10 +8,10 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-  - package-ecosystem: npm
+  - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
     groups:
-      npm:
+      go:
         patterns: ["*"]

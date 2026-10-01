@@ -1,28 +1,50 @@
 # Install
 
-tap needs Node 20 or newer.
+tap is a single binary. It needs no Node runtime. Downstream servers may need their own runtimes.
+
+Download the `linux` or `darwin` archive for `amd64` or `arm64` from
+[Releases](https://github.com/fschrhunt/tap/releases). Extract it, verify its archive against
+`checksums.txt`, and install the binary:
 
 ```sh
-git clone https://github.com/fschrhunt/tap.git ~/.local/share/tap
-cd ~/.local/share/tap
-npm ci --omit=dev
+tar -xzf tap_vVERSION_linux_amd64.tar.gz
 mkdir -p ~/.local/bin
-ln -s ~/.local/share/tap/bin/tap.mjs ~/.local/bin/tap
+install -m 755 tap ~/.local/bin/tap
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. Or install globally from GitHub:
+Use the filename of the release you downloaded. Make sure `~/.local/bin` is on your `PATH`.
+
+## Install with Go
+
+With Go 1.25 or newer:
 
 ```sh
-npm i -g github:fschrhunt/tap
+go install github.com/fschrhunt/tap/cmd/tap@latest
 ```
 
-The npm package named `tap` is an unrelated test runner, so install from GitHub, not by name.
+Make sure Go's binary directory (normally `~/go/bin`) is on your `PATH`.
+
+## Build from source
+
+```sh
+git clone https://github.com/fschrhunt/tap.git
+cd tap
+go build -o tap ./cmd/tap
+mkdir -p ~/.local/bin
+install -m 755 tap ~/.local/bin/tap
+```
+
+Release builds embed the tag in `tap version`. Go installs and local builds report `dev` unless
+built with `-ldflags "-X main.version=VERSION"`.
 
 ## Update
 
+Replace the binary with a newer release, or repeat `go install` above. For a source checkout:
+
 ```sh
-git -C ~/.local/share/tap pull
-cd ~/.local/share/tap && npm ci --omit=dev
+git pull
+go build -o tap ./cmd/tap
+install -m 755 tap ~/.local/bin/tap
 ```
 
 ## Connect your agent

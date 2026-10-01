@@ -15,7 +15,8 @@ engine from a shell, to set it up and to see what your agent sees.
 | `tap path` | Print the config file tap reads |
 | `tap version` | Print the version |
 
-`--json` prints raw output; `--limit N` caps search results (default 8).
+`--json` prints raw output; `--limit N` caps search results (default 8). MCP search validates
+limits from 1 to 25. For compatibility, the CLI keeps the original unconstrained limit handling.
 
 ## Search
 
@@ -46,7 +47,8 @@ tap search echo --json
       "inputSchema": {
         "type": "object",
         "properties": { "message": { "type": "string" } },
-        "required": ["message"]
+        "required": ["message"],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
       }
     }
   ],
@@ -63,7 +65,9 @@ tap call files.echo message=hi
 tap call issues.create --args '{"title": "Login fails", "labels": ["bug"]}'
 ```
 
-A tool that reports an error prints it and exits 1:
+Without `--json`, a tool that reports an error prints its content and a diagnostic on stderr.
+`--json` prints the downstream result directly. For compatibility, both forms exit 0 for a
+tool-reported error; command and protocol failures exit 1:
 
 ```text
 Input validation error: Invalid arguments for tool echo: message: Invalid input: expected string, received undefined

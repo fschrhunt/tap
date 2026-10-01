@@ -16,13 +16,26 @@ when it needs them.
 
 ## Install
 
+Download the archive for your OS and architecture from
+[Releases](https://github.com/fschrhunt/tap/releases), extract it, and put `tap` on your `PATH`.
+It is one binary; no Node runtime is needed.
+
+With Go 1.25 or newer:
+
 ```sh
-git clone https://github.com/fschrhunt/tap.git ~/.local/share/tap
-cd ~/.local/share/tap && npm ci --omit=dev
-ln -s ~/.local/share/tap/bin/tap.mjs ~/.local/bin/tap
+go install github.com/fschrhunt/tap/cmd/tap@latest
 ```
 
-Requires Node 20+. Then point your agent at it, e.g. `claude mcp add --scope user tap -- tap`.
+Or build from source:
+
+```sh
+git clone https://github.com/fschrhunt/tap.git
+cd tap
+go build -o tap ./cmd/tap
+```
+
+Then point your agent at it, e.g. `claude mcp add --scope user tap -- tap`.
+See [Install](docs/install.md) for details.
 
 ## Use
 

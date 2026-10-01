@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version-file: go.mod
+      - name: Build release archives
+        shell: bash
+        run: |
+          mkdir -p dist/package
+          cp LICENSE dist/package/
+          for GOOS in linux darwin; do
+            for GOARCH in amd64 arm64; do
+              export GOOS GOARCH CGO_ENABLED=0
+              go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/package/tap ./cmd/tap
+              tar -czf "dist/tap_${TAG}_${GOOS}_${GOARCH}.tar.gz" -C dist/package tap LICENSE
+            done
+          done
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${TAG}" dist/*.tar.gz dist/checksums.txt --verify-tag --generate-notes
