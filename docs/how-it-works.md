@@ -28,7 +28,8 @@ schema only when it needs that tool.
 - **Deadline.** Connecting and listing tools share a 5-second deadline per server. A server that
   misses it is reported as unavailable for that search and tried again on the next one.
   `TAP_DEADLINE_MS` changes the limit.
-- **Cache.** Each server's tool list is kept for one minute.
+- **Cache.** Each server's tool list is kept for one minute. For compatibility, the no-query
+  catalog omits reachable servers that expose no tools.
 - **Shutdown.** When the agent closes tap's stdin, tap closes every connection and exits.
 
-tap is built on the official MCP TypeScript SDK v2.
+tap is built on the official MCP Go SDK.

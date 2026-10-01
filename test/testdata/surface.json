@@ -1,0 +1,56 @@
+{
+  "tools": [
+    {
+      "name": "plugin_search",
+      "title": "Search MCP integrations",
+      "description": "Find the MCP tools available to you. With a query, returns matching tools with the `id`, input schema, and safety hints needed to call them, plus the total match count and any unreachable server. With no query, lists the configured integrations. Call a result with plugin_call.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "query": {
+            "description": "Capability to find. Omit to list the integrations instead.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum tools to return. Defaults to 8.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 25
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "plugin_call",
+      "title": "Call an MCP tool",
+      "description": "Run a tool discovered with plugin_search. Pass its `id` and an arguments object matching the schema plugin_search returned.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "tool": {
+            "type": "string",
+            "description": "Tool id from plugin_search, written as server.tool."
+          },
+          "arguments": {
+            "description": "Arguments for the tool, matching its input schema.",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      }
+    }
+  ]
+}

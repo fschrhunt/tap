@@ -3,15 +3,19 @@
 Smallness is the point. Prefer the fewest moving parts that solve the problem.
 Keep changes focused and write one test for each behavior worth protecting.
 
-Use Node.js 20 or later:
+Use Go 1.25 or newer:
 
 ```sh
-npm ci
-npm test
+go build -o tap ./cmd/tap
+test -z "$(gofmt -l .)"
+go vet ./...
+go test ./...
 ```
 
 Tests use local fixtures and temporary configs, without network access or your
-own server config. Add a CHANGELOG entry for user-visible changes.
+own server config. `TestMain` builds tap and the Go MCP fixture once. The tests exercise the CLI
+and MCP over stdio, with a local Streamable HTTP peer too. Add a CHANGELOG entry for
+user-visible changes.
 
 Report issues with `tap version` and `tap list` output, what you expected, and
 what happened. Remove sensitive values before sharing output.
