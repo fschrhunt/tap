@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="145" height="72.82" viewBox="212 22 145 72.82" fill="#d1d7e0" role="img" aria-labelledby="tap-logo-title">
+  <title id="tap-logo-title">tap logo</title>
+  <desc>A rounded, outlined pill, like a switch or a single connector.</desc>
+  <!-- Geometric outlines; no fonts or raster images. -->
+  <path fill-rule="evenodd" clip-rule="evenodd" d="M240 22H329C344.464 22 357 34.536 357 50V66.8199C357 82.2839 344.464 94.8199 329 94.8199H240C224.536 94.8199 212 82.2839 212 66.8199V50C212 34.536 224.536 22 240 22ZM240 33.6H329C338.057 33.6 345.4 40.9425 345.4 50V66.8199C345.4 75.8774 338.057 83.22 329 83.22H240C230.943 83.22 223.6 75.8774 223.6 66.8199V50C223.6 40.9425 230.943 33.6 240 33.6Z"/>
+</svg>

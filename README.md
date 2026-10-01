@@ -1,6 +1,14 @@
-<h1 align="center">tap</h1>
+<p align="center">
+  <picture>
+    <source srcset="assets/white/lockup.svg" media="(prefers-color-scheme: dark)">
+    <source srcset="assets/black/lockup.svg" media="(prefers-color-scheme: light)">
+    <img src="assets/black/lockup.svg" alt="tap" height="48">
+  </picture>
+</p>
 <p align="center">Less noise. Better agents.</p>
 <p align="center"><a href="https://github.com/fschrhunt/tap/actions/workflows/ci.yml"><img src="https://github.com/fschrhunt/tap/actions/workflows/ci.yml/badge.svg" alt="CI"></a></p>
+
+---
 
 tap is one MCP server that stands in for all of yours. Your agent loads two tools,
 `plugin_search` and `plugin_call`, instead of every tool from every server, and finds the rest

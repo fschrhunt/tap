@@ -19,6 +19,7 @@ or modify a personal server config for tests.
 - `test/cli.mjs`: CLI behavior with temporary configs.
 - `test/mcp.mjs`: MCP behavior through a spawned tap process.
 - `docs/`: user docs with examples; update them with any user-visible change.
+- `assets/`: the logo, wordmark and lockup SVGs in black and white; see `assets/README.md`.
 
 ## Conventions
 
