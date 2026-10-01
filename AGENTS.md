@@ -18,6 +18,7 @@ or modify a personal server config for tests.
 - `test/fixture.mjs`: local stdio fixture, started with `--serve`.
 - `test/cli.mjs`: CLI behavior with temporary configs.
 - `test/mcp.mjs`: MCP behavior through a spawned tap process.
+- `docs/`: user docs with examples; update them with any user-visible change.
 
 ## Conventions
 
