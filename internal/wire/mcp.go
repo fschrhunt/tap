@@ -36,25 +36,52 @@ func (t *Transport) Connect(ctx context.Context) (mcp.Connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &capturingConnection{Connection: c, pending: map[jsonrpc.ID]*json.RawMessage{}}, nil
+	return &capturingConnection{Connection: c, pending: map[jsonrpc.ID]*pendingCapture{}}, nil
 }
 
 type capturingConnection struct {
 	mcp.Connection
 	mu      sync.Mutex
-	pending map[jsonrpc.ID]*json.RawMessage
+	pending map[jsonrpc.ID]*pendingCapture
 }
 
-// Write associates outgoing SDK requests with their response slots.
+// pendingCapture owns a response slot and its cancellation cleanup.
+type pendingCapture struct {
+	raw  *json.RawMessage
+	stop func() bool
+}
+
+// Write associates outgoing SDK requests with their response slots and removes
+// them on failed writes or request cancellation, even if no response arrives.
 func (c *capturingConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
+	var pending *pendingCapture
+	var id jsonrpc.ID
 	if req, ok := msg.(*jsonrpc.Request); ok && req.IsCall() {
-		if slot, ok := ctx.Value(captureKey{}).(*json.RawMessage); ok {
+		if raw, ok := ctx.Value(captureKey{}).(*json.RawMessage); ok {
+			id = req.ID
+			pending = &pendingCapture{raw: raw}
 			c.mu.Lock()
-			c.pending[req.ID] = slot
+			c.pending[id] = pending
+			pending.stop = context.AfterFunc(ctx, func() {
+				c.mu.Lock()
+				if c.pending[id] == pending {
+					delete(c.pending, id)
+				}
+				c.mu.Unlock()
+			})
 			c.mu.Unlock()
 		}
 	}
-	return c.Connection.Write(ctx, msg)
+	err := c.Connection.Write(ctx, msg)
+	if err != nil && pending != nil {
+		c.mu.Lock()
+		if c.pending[id] == pending {
+			delete(c.pending, id)
+		}
+		pending.stop()
+		c.mu.Unlock()
+	}
+	return err
 }
 
 // Read retains the response before the SDK decodes typed content and schemas.
@@ -63,10 +90,30 @@ func (c *capturingConnection) Read(ctx context.Context) (jsonrpc.Message, error)
 	if res, ok := msg.(*jsonrpc.Response); ok {
 		c.mu.Lock()
 		if slot := c.pending[res.ID]; slot != nil {
-			*slot = append(json.RawMessage(nil), res.Result...)
+			*slot.raw = append(json.RawMessage(nil), res.Result...)
+			slot.stop()
 			delete(c.pending, res.ID)
 		}
 		c.mu.Unlock()
 	}
+	if err != nil {
+		c.clearPending()
+	}
 	return msg, err
+}
+
+// clearPending releases response slots when the connection ends.
+func (c *capturingConnection) clearPending() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, slot := range c.pending {
+		slot.stop()
+		delete(c.pending, id)
+	}
+}
+
+// Close releases captures even when the peer never completes outstanding calls.
+func (c *capturingConnection) Close() error {
+	c.clearPending()
+	return c.Connection.Close()
 }

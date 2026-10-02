@@ -2,6 +2,12 @@
 
 tap reads its servers from `~/.tap/servers.json`. Set `TAP_CONFIG` to use another file.
 
+Selecting a [remote](remote.md) switches discovery, calls and CLI server edits to
+the remote registry. Local servers remain saved; use CLI `--local` to edit them.
+Environment references and paths in a remote server definition resolve on the
+remote machine. Remote selection stores the URL and token environment-variable
+name alongside `servers`, never the token itself.
+
 ## Adding servers
 
 An HTTP server (Streamable HTTP):
@@ -72,4 +78,6 @@ docs — unavailable: fetch failed
   file: `"env": { "API_KEY": "${API_KEY}" }`.
 - `command` and `cwd` may start with `~`.
 - There is no OAuth support; use a token in an environment variable.
+- HTTP redirects are rejected: configure the final MCP endpoint so static
+  authentication headers cannot be forwarded to another destination.
 - If `servers.json` is a symlink, `tap add` and `tap remove` write through it to the real file.

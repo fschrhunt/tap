@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- `tap remote serve` hosts shared connectors over authenticated HTTP or native TLS;
+  `tap remote use` selects a lazy stdio relay without changing harness configurations.
+  Server additions are discovered by existing agents on their next search. Optional
+  separate admin credentials protect connector configuration. No Tailscale dependency.
+- Discovery backs off unavailable servers, retains stale tool catalogs during refresh,
+  persists private indexes across processes, bounds cold fan-out and closes idle sessions.
+  Changed or removed definitions invalidate old sessions and tools. Tool pagination is read.
+- Preserve top-level tool result metadata, clean up raw-response capture bookkeeping,
+  and serialize configuration mutations using unique atomic temporary files.
+- Keep HTTP sessions unwrapped so the SDK sends negotiated protocol headers and
+  receives idle tool-change notifications. Forward application call metadata without
+  letting connector metadata override tap's protocol identity. Stale catalogs are marked
+  explicitly; index writes are coalesced and do not delay discovery.
+- Reject MCP HTTP redirects to prevent configured credentials leaking to other
+  destinations, and omit endpoint URLs from network-error diagnostics.
+- Document remote trust boundaries, approval limitations and cancellation behavior;
+  run the test suite with the race detector in CI.
+
 - Clients on MCP 2026-07-28 (current Claude Code) can list and call tap's tools again: the SDK now
   builds those results, with `resultType`, `ttlMs` and `cacheScope`, instead of tap writing them
   itself. Tools are listed by name, and a downstream `structuredContent: null` is no longer passed on.
