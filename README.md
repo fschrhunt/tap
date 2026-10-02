@@ -58,7 +58,7 @@ tap search create issue                            # what your agent would find
 ## Docs
 
 [Install](docs/install.md) · [Servers](docs/servers.md) · [Command line](docs/cli.md) · [Settings](docs/settings.md) ·
-[Internals](docs/internals.md) · [Remote](docs/remote.md)
+[How it works](docs/how-it-works.md) · [Remote](docs/remote.md)
 
 [Benchmarks](bench/README.md) explain reproducible retrieval comparisons and measured task-run
 evaluation. No competitor superiority claim is made without matched end-to-end measurements.

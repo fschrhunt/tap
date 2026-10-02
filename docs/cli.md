@@ -153,7 +153,7 @@ tap search echo --json
 `tap search`, like an agent's tap, answers at once from the tool lists tap has saved, without
 starting their servers; `stale: true` marks a match whose server has not answered since. The
 [start setting](settings.md#when-servers-start) changes that. `--refresh` asks the servers first. `tap list` always asks them, so what it prints
-is how things are now. See [Internals](internals.md).
+is how things are now. See [How it works](how-it-works.md).
 
 `tap inspect SERVER.TOOL` prints one tool's description and its input and output schemas as
 JSON, asking only the server that has it.

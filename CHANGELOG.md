@@ -13,8 +13,7 @@
   keeps it running. A call still checks its tool against the live server either way.
 - Result references and the search defaults are settings: `references`, `searchLimit` and
   `searchMaxBytes`. The defaults an agent is told in `plugin_search` follow them.
-- **Changed:** `cmd/tap-bench` is `cmd/bench`, and the "How it works" page is
-  [Internals](docs/internals.md).
+- **Changed:** `cmd/tap-bench` is `cmd/bench`.
 
 - `tap auth NAME` signs in to an MCP server through your browser, and tap renews the sign-in
   by itself. It follows the MCP authorization spec, OAuth with the SDK's client: discovery,

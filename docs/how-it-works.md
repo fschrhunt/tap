@@ -1,4 +1,4 @@
-# Internals
+# How it works
 
 tap exposes two MCP tools, with no model or embedding service inside the gateway. Local
 initialization includes a bounded integration-name overview without starting downstream servers.

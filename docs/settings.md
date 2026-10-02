@@ -53,7 +53,7 @@ once. Use `start` for a server that is slow to start and that you use in most se
 
 | Setting | Default | Environment | What it does |
 | --- | --- | --- | --- |
-| `references` | `off` | `TAP_REFERENCES` | Offer result references to the agent: see [Internals](internals.md#opt-in-result-references). Off keeps tap's two tools near 300 tokens |
+| `references` | `off` | `TAP_REFERENCES` | Offer result references to the agent: see [How it works](how-it-works.md#opt-in-result-references). Off keeps tap's two tools near 300 tokens |
 | `searchLimit` | `8` | | How many tools a search returns when the agent does not say. `tap search` uses it too |
 | `searchMaxBytes` | `32768` | | How much a search may return when the agent does not say; past it, schemas become summaries |
 | `deadlineMs` | `5000` | `TAP_DEADLINE_MS` | How long a server may take to connect and list its tools. A tool call itself has no limit |
