@@ -1,6 +1,6 @@
 # tap releases
 
-## Unreleased
+## v1.0.1 · 2026-10-02
 
 - Through a remote, a server that needs a sign-in says so instead of the generic
   `server unavailable`: `needs you to sign in: run "tap auth NAME" on the machine running
