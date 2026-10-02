@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Built with Go 1.27; building from source needs Go 1.26 or newer. The MCP SDK's dependencies
+  (golang.org/x/oauth2, sync, sys and time, segmentio/asm) are on their latest releases.
 - Clients on MCP 2026-07-28 (current Claude Code) can list and call tap's tools again: the SDK now
   builds those results, with `resultType`, `ttlMs` and `cacheScope`, instead of tap writing them
   itself. Tools are listed by name, and a downstream `structuredContent: null` is no longer passed on.

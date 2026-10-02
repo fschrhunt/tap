@@ -16,7 +16,7 @@ Use the filename of the release you downloaded. Make sure `~/.local/bin` is on y
 
 ## Install with Go
 
-With Go 1.25 or newer:
+With Go 1.26 or newer:
 
 ```sh
 go install github.com/fschrhunt/tap/cmd/tap@latest

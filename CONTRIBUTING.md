@@ -3,7 +3,7 @@
 Smallness is the point. Prefer the fewest moving parts that solve the problem.
 Keep changes focused and write one test for each behavior worth protecting.
 
-Use Go 1.25 or newer:
+Use Go 1.26 or newer:
 
 ```sh
 go build -o tap ./cmd/tap
