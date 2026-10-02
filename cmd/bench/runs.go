@@ -126,5 +126,5 @@ func evaluateRuns(records []taskRun) (map[string]any, error) {
 		}
 		reports = append(reports, map[string]any{"system": rows[0].System, "model": rows[0].Model, "runs": len(rows), "successes": successes, "success_rate": float64(successes) / float64(len(rows)), "total_cost_usd": cost, "cost_per_success_usd": costPerSuccess, "input_tokens": input, "output_tokens": output, "p50_latency_ms": latencies[len(latencies)/2], "p95_latency_ms": latencies[(len(latencies)-1)*95/100], "tool_calls": calls, "searches": searches, "retries": retries, "backend_starts": starts, "peak_process_tree_rss_bytes": peakRSS})
 	}
-	return map[string]any{"reports": reports, "note": "Measured records supplied by an external harness; tap-bench does not independently verify outcomes. Matching task/trial/environment/budget/settings is enforced. No confidence intervals or competitor winner claims are inferred."}, nil
+	return map[string]any{"reports": reports, "note": "Measured records supplied by an external harness; bench does not independently verify outcomes. Matching task/trial/environment/budget/settings is enforced. No confidence intervals or competitor winner claims are inferred."}, nil
 }

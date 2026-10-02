@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Settings, in a `settings` block of `servers.json` and with `tap config`: `tap config` shows
+  each one, its value and where it comes from; `tap config set` and `unset` change them, and
+  `--server` keeps `start` or `idleTimeoutMs` for one server. A mistyped setting is refused with
+  what it takes. `TAP_REFERENCES`, `TAP_DEADLINE_MS`, `TAP_IDLE_TTL_MS` and `TAP_FAIL_TTL_MS`
+  still work, and win over the config. See [Settings](docs/settings.md).
+- **Changed:** tap is lazier by default. The `start` setting says when a server starts: `call`,
+  the new default, starts it only for a call, so a search answers from saved tools without
+  starting anything; `search` is how tap behaved before; `start` starts a server with tap and
+  keeps it running. A call still checks its tool against the live server either way.
+- Result references and the search defaults are settings: `references`, `searchLimit` and
+  `searchMaxBytes`. The defaults an agent is told in `plugin_search` follow them.
+- **Changed:** `cmd/tap-bench` is `cmd/bench`.
+
 - `tap auth NAME` signs in to an MCP server through your browser, and tap renews the sign-in
   by itself. It follows the MCP authorization spec, OAuth with the SDK's client: discovery,
   client registration, PKCE. `--no-browser` and a pasted address cover machines

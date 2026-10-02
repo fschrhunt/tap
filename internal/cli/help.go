@@ -71,7 +71,7 @@ var topics = []topic{
 			"matched against a tool's name, its server, its description and its parameters. With\n" +
 			"--server and no query, it lists that server's tools.",
 		examples: []string{"tap search create issue", "tap search screenshot --limit 3", "tap search --server github", "tap search read file --json   # with input schemas, as an agent gets them"},
-		flags: [][2]string{{"    --server NAME", "look only in this server"}, {"    --limit N", "how many tools to print (default 8)"},
+		flags: [][2]string{{"    --server NAME", "look only in this server"}, {"    --limit N", "how many tools to print (default: the searchLimit setting, 8)"},
 			{"    --offset N", "skip this many matches, to continue a longer list"}, {"    --refresh", "ask the servers for their tools first"},
 			{"    --json", "print the matches as JSON, with input schemas"},
 			{"    --detail auto|full|summary", "with --json: whole schemas, or summaries (default full)"},
@@ -94,6 +94,18 @@ var topics = []topic{
 		examples: []string{"tap remote serve --addr 0.0.0.0:8765 --tls-cert cert.pem --tls-key key.pem", "tap remote use https://tap.example.com:8765", "tap remote status", "tap remote off"},
 		flags: [][2]string{{"    --addr HOST:PORT", "where serve listens (default 127.0.0.1:7777)"}, {"    --tls-cert FILE, --tls-key FILE", "serve HTTPS with this certificate"},
 			{"    --token-env VARIABLE", "the variable holding the token (default TAP_REMOTE_TOKEN)"}, {"    --allow-insecure", "allow plain HTTP beyond this machine"}}},
+	{name: "config", group: "Other", summary: "show or change tap's settings", page: "settings.md",
+		usage: []string{"tap config [--json]", "tap config NAME [--server NAME]", "tap config set NAME VALUE [--server NAME]", "tap config unset NAME [--server NAME]"},
+		about: "Shows each setting, its value and where the value comes from: its default, the\n" +
+			"config, or an environment variable, which wins over both. set keeps a value in the\n" +
+			"config; unset removes it. With --server, start and idleTimeoutMs are kept for one\n" +
+			"server and win over the general value. TAP_REFERENCES, TAP_DEADLINE_MS, TAP_IDLE_TTL_MS\n" +
+			"and TAP_FAIL_TTL_MS win over references, deadlineMs, idleTimeoutMs and retryAfterMs.\n" +
+			"An agent's tap reads its settings when it starts.",
+		examples: []string{"tap config", "tap config set start search          # check tools again on every search",
+			"tap config set start start --server playwright   # start it with tap and keep it running",
+			"tap config set references on", "tap config unset start --server playwright"},
+		flags: [][2]string{{"    --server NAME", "the server whose own value to read, set or unset"}, {"    --json", "print the settings as JSON"}}},
 	{name: "path", group: "Other", summary: "print the config file tap reads", usage: []string{"tap path"}, page: "servers.md#the-config-file",
 		about: "Prints the config file. Set TAP_CONFIG to use another."},
 	{name: "version", group: "Other", summary: "print the version", usage: []string{"tap version"}, page: "install.md"},
@@ -192,13 +204,13 @@ func full(w io.Writer, version string) {
 	fmt.Fprintln(w)
 	p.heading("Flags")
 	p.rows([][2]string{{"-h, --help", "show help for tap or for a command"}, {"    --version", "print the version"},
-		{"    --json", "print JSON instead of text (import, list, refresh, search, call)"},
+		{"    --json", "print JSON instead of text (import, list, refresh, search, call, config)"},
 		{"    --local", "use this machine's servers while a remote is selected"}})
 	fmt.Fprintln(w)
 	p.heading("Environment")
-	p.rows([][2]string{{"TAP_CONFIG", "the config file (default ~/.tap/servers.json)"}, {"TAP_DEADLINE_MS", "how long a server may take to connect and list its tools (default 5000)"},
-		{"TAP_REFERENCES", "set to on to let an agent keep large results as references"},
+	p.rows([][2]string{{"TAP_CONFIG", "the config file (default ~/.tap/servers.json)"},
 		{"TAP_REMOTE_TOKEN", "the token a remote and its clients share"}, {"NO_COLOR", "set to print help without bold headings"}})
+	fmt.Fprintln(w, "  Some settings have variables of their own; see \"tap config --help\".")
 	fmt.Fprintf(w, "\nRun \"tap COMMAND --help\" for a command's examples and flags.\nDocs:   %s\nIssues: %s\n", docs, issues)
 }
 

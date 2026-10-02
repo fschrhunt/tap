@@ -8,6 +8,7 @@ tool from every server, and finds the rest when it needs them.
 | [Install](install.md) | Getting tap, and connecting it to Claude Code, Codex or Opencode |
 | [Servers](servers.md) | Adding MCP servers, and the config file in full |
 | [Command line](cli.md) | Every `tap` command, with sample output |
+| [Settings](settings.md) | When servers start, references, search size, deadlines and timeouts |
 | [How it works](how-it-works.md) | What the agent sees, connections, deadlines and caching |
 | [Remote](remote.md) | Sharing connectors across machines over authenticated HTTP or HTTPS |
 

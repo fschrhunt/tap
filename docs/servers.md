@@ -159,6 +159,8 @@ there.
 | `command` | stdio | The command and its arguments, as an array |
 | `cwd` | stdio | Directory to start in |
 | `env` | stdio | Extra environment variables |
+| `start` | both | When this server starts: `call`, `search` or `start`; see [Settings](settings.md#when-servers-start) |
+| `idleTimeoutMs` | stdio | How long this server keeps running unused |
 
 - Values in `headers` and `env` expand `${NAME}` from tap's environment, so secrets stay out of the
   file: `"env": { "API_KEY": "${API_KEY}" }`.
@@ -205,6 +207,6 @@ Because calls all route through `plugin_call`, native host permissions for origi
 names may no longer apply. Configure tap policy and host restrictions explicitly. Server
 `readOnlyHint` / `destructiveHint` annotations inform the agent but never grant authorization.
 
-`idleTimeoutMs` is an optional stdio-only override of the default five-minute timeout
-(`TAP_IDLE_TTL_MS`). Use a suitably long timeout for a browser, transaction or other stateful
+`idleTimeoutMs` is an optional stdio-only override of the `idleTimeoutMs` [setting](settings.md),
+five minutes by default. Use a suitably long timeout for a browser, transaction or other stateful
 backend unless losing its process-local state is acceptable.

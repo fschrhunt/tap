@@ -57,7 +57,7 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 		opt.Detail = "auto"
 	}
 	if opt.MaxBytes == 0 {
-		opt.MaxBytes = 32768
+		opt.MaxBytes = e.settings.SearchMaxBytes
 	}
 	snapshot, err := e.snapshot()
 	if err != nil {
@@ -248,9 +248,19 @@ func offeredTools(server string, def wire.Object, tools []wire.Object) []discove
 	return out
 }
 
-// Warm reads the saved tool lists, so the first search does not wait for them. It starts
-// no server.
-func (e *Engine) Warm() { _, _ = e.snapshot() }
+// Warm reads the saved tool lists, so the first search does not wait for them, and starts
+// the servers whose start setting is start. It starts no other server.
+func (e *Engine) Warm() {
+	snapshot, err := e.snapshot()
+	if err != nil {
+		return
+	}
+	for _, f := range snapshot.servers {
+		if def, _ := f.Value.(wire.Object); e.start(def) == config.StartWithTap {
+			go func() { _, _ = e.liveTools(e.ctx, f.Name, def, snapshot.fingerprints[f.Name], true, nil) }()
+		}
+	}
+}
 
 // toolView never clips schemas; summaries explicitly identify missing call contracts.
 func toolView(t discovery.Tool, full bool) wire.Object {

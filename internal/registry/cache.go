@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,14 +41,6 @@ type catalog struct {
 	session      *entry
 	// digest names what the server last answered; a refresh that finds it again keeps tools.
 	digest string
-}
-
-// envDuration accepts zero for deterministic retry tests.
-func envDuration(name string, fallback time.Duration) time.Duration {
-	if ms, err := strconv.ParseInt(os.Getenv(name), 10, 64); err == nil && ms >= 0 && ms <= 2147483647 {
-		return time.Duration(ms) * time.Millisecond
-	}
-	return fallback
 }
 
 // definitionFingerprint hashes configured/expanded inputs and inherited child credentials.
@@ -136,6 +127,8 @@ func (e *Engine) snapshot() (*configSnapshot, error) {
 
 // toolsFor returns tools, stale status and last refresh error together.
 // Warm callers return immediately during one shared refresh; cold waits may cancel independently.
+// A server started only by calls is not started to be asked again once tap holds its tools:
+// they stay marked stale until it runs for a call or a refresh, and then it is asked.
 func (e *Engine) toolsFor(ctx context.Context, name string, def wire.Object, fingerprint string, quiet bool) ([]wire.Object, bool, error) {
 	e.mu.Lock()
 	if e.ctx.Err() != nil {
@@ -155,6 +148,11 @@ func (e *Engine) toolsFor(ctx context.Context, name string, def wire.Object, fin
 		tools := c.tools
 		e.mu.Unlock()
 		return tools, false, nil
+	}
+	if c.good && e.start(def) == config.StartOnCall && !e.running(name) {
+		tools, err := c.tools, c.err
+		e.mu.Unlock()
+		return tools, true, err
 	}
 	if c.refreshing == nil && !time.Now().Before(c.retryAt) {
 		c.refreshing = make(chan struct{})
@@ -230,6 +228,20 @@ func (e *Engine) liveTools(ctx context.Context, name string, def wire.Object, fi
 		return nil, fmt.Errorf("catalog changed during refresh")
 	}
 	return c.tools, nil
+}
+
+// running reports whether a session with the server is open. The caller holds e.mu.
+func (e *Engine) running(name string) bool {
+	ent := e.entries[name]
+	if ent == nil {
+		return false
+	}
+	select {
+	case <-ent.ready:
+		return ent.err == nil
+	default:
+		return false
+	}
 }
 
 // refresh publishes only complete lists; failures preserve prior tools and back off. A list

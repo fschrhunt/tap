@@ -199,7 +199,7 @@ func (s *shell) run(args []string) (int, error) {
 			// The agent's first search usually comes a moment after it starts tap.
 			go e.Warm()
 		}
-		return 0, server.Serve(s.ctx, backend, e.Version)
+		return 0, server.Serve(s.ctx, backend, e.Version, e.Settings())
 	}
 	if len(before) == 0 {
 		return 2, wrong("", "a command comes before --")
@@ -231,6 +231,8 @@ func (s *shell) run(args []string) (int, error) {
 	case "version", "--version", "-v":
 		print(s.out, e.Version, false)
 		return 0, nil
+	case "config":
+		return s.config(rest)
 	case "path":
 		if len(rest) > 0 {
 			return 2, wrong("path", "path takes no arguments")
@@ -259,6 +261,156 @@ func (s *shell) run(args []string) (int, error) {
 		return s.remote(rest)
 	}
 	return 2, s.unknown(command)
+}
+
+// config shows tap's settings, or one of them, and changes them: set keeps a value, unset
+// returns a setting to the general value or its default. --server reads and writes a server's
+// own value, for the settings a server may have. Settings live in this machine's config.
+func (s *shell) config(args []string) (int, error) {
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	json := fs.Bool("json", false, "")
+	only := fs.String("server", "", "")
+	args, err := parse("config", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	setting := func(name string) (config.Setting, error) {
+		found, ok := config.Find(name)
+		if ok {
+			return found, nil
+		}
+		names := []string{}
+		for _, known := range config.Settings {
+			names = append(names, known.Name)
+		}
+		if meant := nearest(name, names); meant != "" {
+			return found, wrong("config", "there is no setting \"%s\". Did you mean \"%s\"?", name, meant)
+		}
+		return found, wrong("config", "there is no setting \"%s\". Run \"tap config\" to see them", name)
+	}
+	// value is what a setting stands at, for one server when one is named.
+	value := func(name string) (string, error) {
+		if *only != "" {
+			owned, err := config.Owned(s.engine.Path)
+			if err != nil {
+				return "", err
+			}
+			for _, own := range owned {
+				if own.Server == *only && own.Name == name {
+					return own.Text, nil
+				}
+			}
+		}
+		current, err := config.Current(s.engine.Path)
+		if err != nil {
+			return "", err
+		}
+		for _, v := range current {
+			if v.Name == name {
+				return v.Text, nil
+			}
+		}
+		return "", nil
+	}
+	if len(args) == 0 || (len(args) == 1 && args[0] != "set" && args[0] != "unset") {
+		if *only != "" && len(args) == 0 {
+			return 2, wrong("config", "--server needs the name of a setting, such as \"tap config start --server %s\"", *only)
+		}
+		if len(args) == 1 {
+			found, err := setting(args[0])
+			if err != nil {
+				return 2, err
+			}
+			if *only != "" && !found.PerServer {
+				return 2, wrong("config", "%s applies to every server, so it has no value for one", found.Name)
+			}
+			text, err := value(found.Name)
+			if err != nil {
+				return 1, err
+			}
+			print(s.out, text, false)
+			return 0, nil
+		}
+		current, err := config.Current(s.engine.Path)
+		if err != nil {
+			return 1, err
+		}
+		owned, err := config.Owned(s.engine.Path)
+		if err != nil {
+			return 1, err
+		}
+		if *json {
+			out := wire.Object{}
+			for _, v := range current {
+				kept, _ := v.Parse(v.Text)
+				out.Set(v.Name, wire.Object{{Name: "value", Value: kept}, {Name: "from", Value: v.From}})
+			}
+			servers := wire.Object{}
+			for _, own := range owned {
+				o, _ := servers.Get(own.Server).(wire.Object)
+				found, _ := config.Find(own.Name)
+				kept, _ := found.Parse(own.Text)
+				servers.Set(own.Server, append(o, wire.Field{Name: own.Name, Value: kept}))
+			}
+			print(s.out, wire.Object{{Name: "settings", Value: out}, {Name: "servers", Value: servers}}, true)
+			return 0, nil
+		}
+		name, text, from := 0, 0, 0
+		for _, v := range current {
+			name, text, from = max(name, len(v.Name)), max(text, len(v.Text)), max(from, len(v.From))
+		}
+		for _, v := range current {
+			fmt.Fprintf(s.out, "%-*s  %-*s  %-*s  %s\n", name, v.Name, text, v.Text, from, v.From, v.About)
+		}
+		if len(owned) > 0 {
+			fmt.Fprintln(s.out, "\nServers with their own:")
+			width := 0
+			for _, own := range owned {
+				width = max(width, len(own.Server))
+			}
+			for _, own := range owned {
+				fmt.Fprintf(s.out, "%-*s  %s: %s\n", width, own.Server, own.Name, own.Text)
+			}
+		}
+		return 0, nil
+	}
+	verb := args[0]
+	if (verb == "set" && len(args) != 3) || (verb == "unset" && len(args) != 2) {
+		return 2, wrong("config", "%s takes a setting's name%s", verb, map[bool]string{true: " and its value", false: ""}[verb == "set"])
+	}
+	found, err := setting(args[1])
+	if err != nil {
+		return 2, err
+	}
+	if *only != "" && !found.PerServer {
+		return 2, wrong("config", "%s applies to every server and cannot be set for one", found.Name)
+	}
+	var kept any
+	if verb == "set" {
+		if kept, err = found.Parse(args[2]); err != nil {
+			return 2, wrong("config", "%s takes %s", found.Name, err)
+		}
+	}
+	if err = config.Set(s.engine.Path, *only, found.Name, kept); err != nil {
+		return 1, err
+	}
+	text, err := value(found.Name)
+	if err != nil {
+		return 1, err
+	}
+	switch {
+	case *only != "" && verb == "set":
+		print(s.out, fmt.Sprintf("%s is now %s for %s", found.Name, text, *only), false)
+	case *only != "":
+		print(s.out, fmt.Sprintf("%s follows the general %s again: %s", *only, found.Name, text), false)
+	default:
+		print(s.out, fmt.Sprintf("%s is now %s", found.Name, text), false)
+	}
+	if found.Env != "" && os.Getenv(found.Env) != "" {
+		s.hint("%s is set in this shell and wins over the config here.", found.Env)
+	}
+	s.hint("An agent's tap reads its settings when it starts: start a new agent session to use this.")
+	return 0, nil
 }
 
 // unknown names a command tap does not have and, when it can, the one that was meant.
@@ -634,7 +786,7 @@ func (s *shell) search(args []string) (int, error) {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	json := fs.Bool("json", false, "")
 	local := fs.Bool("local", false, "")
-	limit := fs.String("limit", "8", "")
+	limit := fs.String("limit", strconv.Itoa(s.engine.Settings().SearchLimit), "")
 	only := fs.String("server", "", "")
 	detail := fs.String("detail", "full", "")
 	offset := fs.Int("offset", 0, "")

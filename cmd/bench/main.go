@@ -1,4 +1,4 @@
-// Command tap-bench evaluates retrieval on a frozen corpus without servers or models.
+// Command bench evaluates retrieval on a frozen corpus without servers or models.
 // Optional recorded rankings allow competitors to be compared on the identical queries.
 package main
 
@@ -223,7 +223,7 @@ func legacyTokens(text string) []string {
 // main reports invalid datasets and evaluation failures with a nonzero exit status.
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "tap-bench:", err)
+		fmt.Fprintln(os.Stderr, "bench:", err)
 		os.Exit(1)
 	}
 }
