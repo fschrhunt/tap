@@ -435,3 +435,30 @@ func TestConnectionErrorsHideSecrets(t *testing.T) {
 		t.Fatalf("leaked config: %s", data)
 	}
 }
+
+// TestSafeCatalogKeepsSignInInstruction pins what crosses the network in a catalog row: tap's
+// own sign-in instruction with where to run it, while connector diagnostics stay masked and
+// anything padded around the instruction does not pass as tap's own.
+func TestSafeCatalogKeepsSignInInstruction(t *testing.T) {
+	rows := []any{
+		wire.Object{{Name: "server", Value: "cloudflare"}, {Name: "error", Value: `needs you to sign in: run "tap auth cloudflare"`}},
+		wire.Object{{Name: "server", Value: "files"}, {Name: "error", Value: `exec: "npx": executable file not found in $PATH`}},
+		wire.Object{{Name: "server", Value: "odd"}, {Name: "error", Value: `needs you to sign in: run "tap auth odd" (as root)`}},
+	}
+	out := safeCatalog(wire.Object{{Name: "integrations", Value: rows}}, "integrations")
+	got, _ := out.Get("integrations").([]any)
+	want := []string{
+		`needs you to sign in: run "tap auth cloudflare" on the machine running tap remote serve`,
+		"server unavailable",
+		"server unavailable",
+	}
+	for i, w := range want {
+		row, ok := got[i].(wire.Object)
+		if !ok {
+			t.Fatalf("row %d is not an object", i)
+		}
+		if e := wire.String(row.Get("error")); e != w {
+			t.Errorf("row %d error = %q, want %q", i, e, w)
+		}
+	}
+}

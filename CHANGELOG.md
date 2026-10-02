@@ -1,5 +1,12 @@
 # tap releases
 
+## Unreleased
+
+- Through a remote, a server that needs a sign-in says so instead of the generic
+  `server unavailable`: `needs you to sign in: run "tap auth NAME" on the machine running
+  tap remote serve`. The instruction carries only the server's name; every other connector
+  error stays masked on the way out.
+
 ## v1.0.0 · 2026-10-02
 
 - Releases: `scripts/release.sh` names the Unreleased section in a PR, then tags it once CI has

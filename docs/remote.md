@@ -81,6 +81,11 @@ All command paths, filesystem access, working directories and environment
 references resolve **on the remote**, not on the client. For example,
 `--bearer-token-env ISSUES_TOKEN` reads the remote process's environment.
 
+A server waiting for a sign-in reports it through the remote too —
+`needs you to sign in: run "tap auth NAME" on the machine running tap remote serve` —
+because the sign-in lives on that machine. Every other connector error stays
+generic, so the relay never carries host diagnostics.
+
 `tap remote off` returns to the saved local registry. CLI `--local` explicitly
 uses local connectors while a remote is configured. Local and remote registries
 are not merged, avoiding ambiguous tool IDs. Remote outages are errors, never a

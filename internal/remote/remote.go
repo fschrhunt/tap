@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
 	"github.com/fschrhunt/tap/internal/registry"
 	"github.com/fschrhunt/tap/internal/server"
@@ -562,13 +563,21 @@ type hostedBackend struct{ *registry.Engine }
 // ReferenceSessionRequired prevents stateless HTTP clients from sharing an empty reference scope.
 func (e hostedBackend) ReferenceSessionRequired() bool { return true }
 
-// safeCatalog hides connector diagnostics that may contain credentials or commands.
+// safeCatalog hides connector diagnostics that may contain credentials or commands. Tap's own
+// sign-in instruction names only a server, so it crosses the network unchanged apart from
+// pointing at where it can be acted on: the machine running tap remote serve.
 func safeCatalog(out wire.Object, field string) wire.Object {
 	rows, _ := out.Get(field).([]any)
 	for _, v := range rows {
-		if row, ok := v.(wire.Object); ok && row.Has("error") {
-			row.Set("error", "server unavailable")
+		row, ok := v.(wire.Object)
+		if !ok || !row.Has("error") {
+			continue
 		}
+		if msg, _ := row.Get("error").(string); auth.IsRequiredMessage(msg) {
+			row.Set("error", msg+" on the machine running tap remote serve")
+			continue
+		}
+		row.Set("error", "server unavailable")
 	}
 	return out
 }
