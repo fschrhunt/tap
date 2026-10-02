@@ -216,7 +216,7 @@ func New(cfg config.Remote, version string) (*Client, error) {
 	}
 	token := os.Getenv(cfg.TokenEnv)
 	if token == "" {
-		return nil, fmt.Errorf("remote token environment variable is not set")
+		return nil, fmt.Errorf("remote token environment variable %s is not set", cfg.TokenEnv)
 	}
 	lifetime, cancel := context.WithCancel(context.Background())
 	return &Client{ctx: lifetime, cancel: cancel, cfg: cfg, version: version, http: &http.Client{Transport: bearerTransport{token: token}, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("remote redirects are forbidden") }}}, nil
