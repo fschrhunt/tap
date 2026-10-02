@@ -60,6 +60,9 @@ type result struct {
 type box struct {
 	t      *testing.T
 	config string
+	// env is appended to the command's environment, where a later entry wins over an earlier
+	// one: tests set HOME, PATH and the like without inheriting the caller's.
+	env []string
 }
 
 // sandbox creates a registry with no access to the caller's personal configuration.
@@ -75,6 +78,7 @@ func (b *box) run(args ...string) result {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tapBin, args...)
 	cmd.Env = append(os.Environ(), "TAP_CONFIG="+b.config, "TAP_DEADLINE_MS=500", "TAP_CACHE_DIR="+filepath.Join(filepath.Dir(b.config), "cache"))
+	cmd.Env = append(cmd.Env, b.env...)
 	var out, errout bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errout

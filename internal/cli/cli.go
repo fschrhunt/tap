@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -253,6 +254,8 @@ func (s *shell) run(args []string) (int, error) {
 		return s.search(rest)
 	case "call":
 		return s.call(rest)
+	case "connect":
+		return s.connect(rest)
 	case "import":
 		return s.imports(rest)
 	case "auth":
@@ -954,6 +957,168 @@ func toolArgs(raw string, pairs []string) (any, error) {
 		values = o
 	}
 	return values, nil
+}
+
+// connectable is one coding agent tap can point at itself: the id a person types for it and the
+// command the agent's own tool takes to add tap as an MCP server.
+type connectable struct {
+	id      string
+	command []string
+}
+
+// connectables lists the agents tap connects, in the order bare connect reports them.
+var connectables = []connectable{
+	{"claude", []string{"claude", "mcp", "add", "--scope", "user", "tap", "--", "tap"}},
+	{"codex", []string{"codex", "mcp", "add", "tap", "--", "tap"}},
+	{"opencode", []string{"opencode", "mcp", "add", "--global", "tap", "--", "tap"}},
+}
+
+// connectPlaces lists the config file an agent's own command writes, for its id and a home
+// directory. Each agent keeps its config where its own environment variables say, so these
+// follow them the same way.
+func connectPlaces(id, home string) []string {
+	switch id {
+	case "claude":
+		dir := home
+		if v := os.Getenv("CLAUDE_CONFIG_DIR"); v != "" {
+			dir = v
+		}
+		return []string{filepath.Join(dir, ".claude.json")}
+	case "codex":
+		dir := filepath.Join(home, ".codex")
+		if v := os.Getenv("CODEX_HOME"); v != "" {
+			dir = v
+		}
+		return []string{filepath.Join(dir, "config.toml")}
+	case "opencode":
+		dir := filepath.Join(home, ".config", "opencode")
+		if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+			dir = filepath.Join(v, "opencode")
+		}
+		return []string{filepath.Join(dir, "opencode.jsonc"), filepath.Join(dir, "opencode.json")}
+	}
+	return nil
+}
+
+// hasTap reports whether an agent's config already holds tap, reading only the files its own
+// command writes. A file that is not there simply does not have tap.
+func hasTap(c connectable, home, cwd string) (bool, error) {
+	for _, path := range connectPlaces(c.id, home) {
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		found, err := agents.Read(agents.Place{ID: c.id, Path: path}, cwd)
+		if err != nil {
+			return false, err
+		}
+		if found.Has("tap") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// connect points coding agents at tap by running each agent's own command to add tap as an MCP
+// server: only that command writes the agent's config. With no argument it connects every agent
+// it finds on this machine; an argument names the agents to connect, and all of them are settled
+// before any command runs, so a mistake leaves every config as it was. An agent that already has
+// tap is reported and left as it is.
+func (s *shell) connect(args []string) (int, error) {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	args, err := parse("connect", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+	ids := []string{}
+	for _, c := range connectables {
+		ids = append(ids, c.id)
+	}
+	// plan is one agent to connect, and whether its config already holds tap.
+	type plan struct {
+		connectable
+		already bool
+	}
+	plans := []plan{}
+	// consider settles one agent: one that already has tap needs no command, and a named one
+	// whose command is not on this machine is an error before any command runs. With no name,
+	// an agent whose command is missing is simply not one of the agents found here.
+	consider := func(c connectable, named bool) error {
+		here, err := hasTap(c, home, cwd)
+		if err != nil {
+			return err
+		}
+		if here {
+			plans = append(plans, plan{c, true})
+			return nil
+		}
+		if _, err := exec.LookPath(c.command[0]); err != nil {
+			if !named {
+				return nil
+			}
+			return fmt.Errorf("no %s command was found on this machine, so tap cannot connect %s", c.id, c.id)
+		}
+		plans = append(plans, plan{c, false})
+		return nil
+	}
+	if len(args) == 0 {
+		for _, c := range connectables {
+			if err := consider(c, false); err != nil {
+				return 1, err
+			}
+		}
+		if len(plans) == 0 {
+			return 1, fmt.Errorf("no coding agent was found on this machine. tap looked for %s", strings.Join(ids, ", "))
+		}
+	}
+	seen := map[string]bool{}
+	for _, source := range args {
+		if seen[source] {
+			continue
+		}
+		seen[source] = true
+		i := slices.IndexFunc(connectables, func(c connectable) bool { return c.id == source })
+		if i < 0 {
+			if meant := nearest(source, ids); meant != "" {
+				return 2, wrong("connect", "\"%s\" is not an agent tap can connect. Did you mean \"%s\"?", source, meant)
+			}
+			return 2, wrong("connect", "\"%s\" is not an agent tap can connect. The agents are %s", source, strings.Join(ids, ", "))
+		}
+		if err := consider(connectables[i], true); err != nil {
+			return 1, err
+		}
+	}
+	width := 0
+	for _, p := range plans {
+		width = max(width, len(p.id))
+	}
+	connected := 0
+	for _, p := range plans {
+		if p.already {
+			fmt.Fprintf(s.out, "%-*s  %s\n", width, p.id, "has tap already")
+			continue
+		}
+		out, err := exec.Command(p.command[0], p.command[1:]...).CombinedOutput()
+		if err != nil {
+			text := strings.TrimSpace(string(out))
+			// Claude refuses a second server under one name, which is what was asked for here.
+			if text == "MCP server tap already exists in user config" {
+				fmt.Fprintf(s.out, "%-*s  %s\n", width, p.id, "has tap already")
+				continue
+			}
+			if text == "" {
+				text = err.Error()
+			}
+			return 1, fmt.Errorf("%s could not add tap: %s", p.id, text)
+		}
+		fmt.Fprintf(s.out, "%-*s  %s\n", width, p.id, "connected")
+		connected++
+	}
+	if connected > 0 {
+		s.hint("Start a new agent session so it loads tap.")
+	}
+	return 0, nil
 }
 
 // imports adds the servers that coding agents already have. It reads the agents' files and

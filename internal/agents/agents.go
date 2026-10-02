@@ -34,6 +34,21 @@ type Config struct {
 	Skipped     []Skipped
 }
 
+// Has reports whether the file holds a server by this name, even one tap skips.
+func (c *Config) Has(name string) bool {
+	for _, server := range c.Servers {
+		if server.Name == name {
+			return true
+		}
+	}
+	for _, skip := range c.Skipped {
+		if skip.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Place is a file where an agent may keep servers.
 type Place struct {
 	// ID is what a person types to pick the agent: claude, codex, opencode, cursor or vscode.

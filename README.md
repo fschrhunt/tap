@@ -39,8 +39,8 @@ cd tap
 go build -o tap ./cmd/tap
 ```
 
-Then point your agent at it, e.g. `claude mcp add --scope user tap -- tap`.
-See [Install](docs/install.md) for details.
+Then point your agent at it with `tap connect`, or by hand with e.g.
+`claude mcp add --scope user tap -- tap`. See [Install](docs/install.md) for details.
 
 ## Use
 
