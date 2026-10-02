@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
-	"github.com/fschrhunt/tap/internal/discovery"
 	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -35,6 +35,7 @@ type Engine struct {
 	cancel                context.CancelFunc
 	closeOnce             sync.Once
 	snapshotMu, indexMu   sync.Mutex
+	last                  *configSnapshot
 	indexDirty, indexDone chan struct{}
 	definitions           map[string]string
 	catalogs              map[string]*catalog
@@ -43,9 +44,6 @@ type Engine struct {
 	failTTL, idleTTL      time.Duration
 	workers               sync.WaitGroup
 	results               resultStore
-	rankMu                sync.Mutex
-	index                 *discovery.Index
-	indexKey              string
 }
 
 // entry is one connection generation; ready publishes session and err.
@@ -79,6 +77,10 @@ func New(path, version string) *Engine {
 
 // Message formats SDK errors without exposing credential-bearing endpoint URLs.
 func Message(err error) string {
+	var signIn *auth.Required
+	if errors.As(err, &signIn) {
+		return signIn.Error()
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, mcp.ErrConnectionClosed) {
 		return "Connection closed"
 	}
@@ -173,7 +175,7 @@ func (e *Engine) open(name string, def wire.Object, quiet bool, ent *entry) {
 		ent.openedAt = time.Now()
 		ctx, cancel := context.WithTimeout(e.ctx, e.deadline)
 		defer cancel()
-		transport, terr := transportFor(name, def, quiet)
+		transport, terr := transportFor(e.Path, name, def, quiet)
 		err = terr
 		if def.Has("idleTimeoutMs") {
 			ms, ok := def.Get("idleTimeoutMs").(float64)
@@ -256,8 +258,10 @@ func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-// transportFor chooses the SDK transport and configures the child environment.
-func transportFor(name string, def wire.Object, quiet bool) (mcp.Transport, error) {
+// transportFor chooses the SDK transport and configures the child environment. An HTTP server
+// with no credential of its own configured is lent the sign-in saved for it beside the config
+// at path, if there is one.
+func transportFor(path, name string, def wire.Object, quiet bool) (mcp.Transport, error) {
 	typ, _ := def.Get("type").(string)
 	endpoint, _ := def.Get("url").(string)
 	if typ == "" {
@@ -330,7 +334,11 @@ func transportFor(name string, def wire.Object, quiet bool) (mcp.Transport, erro
 	if token, ok := def.Get("bearerTokenEnv").(string); ok && os.Getenv(token) != "" {
 		headers.Set("Authorization", "Bearer "+os.Getenv(token))
 	}
-	return &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &http.Client{Transport: headerTransport{headers}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1}, nil
+	transport := &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &http.Client{Transport: headerTransport{headers}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1}
+	if headers.Get("Authorization") == "" {
+		transport.OAuthHandler = auth.Handler(path, name, endpoint)
+	}
+	return transport, nil
 }
 
 type serverTools struct {

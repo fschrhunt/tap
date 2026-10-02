@@ -75,8 +75,9 @@ func TestCLI(t *testing.T) {
 	for _, alias := range []string{"serve", "mcp"} {
 		t.Run(alias+" is rejected as an unknown command", func(t *testing.T) {
 			r := sandbox(t).run(alias)
-			equal(t, r.status, 1)
-			contains(t, r.stdout, "tap list")
+			equal(t, r.status, 2)
+			equal(t, r.stdout, "")
+			contains(t, r.stderr, `there is no "`+alias+`" command`)
 		})
 	}
 	t.Run("local server type is rejected", func(t *testing.T) {
@@ -135,11 +136,11 @@ func TestCLIArguments(t *testing.T) {
 	equal(t, output(t, b.run("call", "fixture.echo", "--args", `{"message":"json"}`, "message=override")), "override")
 }
 
-// TestToolErrorExitCode preserves the original tool-error exit code and diagnostic.
+// TestToolErrorExitCode pins that a tool's own error fails the command, with what it said on stdout.
 func TestToolErrorExitCode(t *testing.T) {
 	b := sandbox(t)
 	b.write(map[string]any{"servers": map[string]any{"fixture": definition()}})
-	equal(t, b.run("call", "fixture.fail"), result{0, "fixture failure\n", "tap: fixture.fail reported an error\n"})
+	equal(t, b.run("call", "fixture.fail"), result{1, "fixture failure\n", "tap: fixture.fail reported an error\n"})
 }
 
 // TestJSONDiagnostics pins the original diagnostics for malformed config and arguments.
@@ -162,24 +163,24 @@ func TestJSONDiagnostics(t *testing.T) {
 				t.Fatal(err)
 			}
 			equal(t, b.run("list"), result{1, "", "tap: " + b.config + " is not valid JSON: " + c.message + "\n"})
-			equal(t, b.run("call", "fixture.echo", "--args", c.input), result{1, "", "tap: " + c.message + "\n"})
+			r := b.run("call", "fixture.echo", "--args", c.input)
+			equal(t, r.status, 2)
+			contains(t, r.stderr, "tap: --args is not valid JSON: "+c.message+"\n")
 		})
 	}
 }
 
-// TestCLIUnboundedLimit preserves JavaScript slice behavior for shell search limits.
-func TestCLIUnboundedLimit(t *testing.T) {
+// TestCLISearchLimit pins that --limit caps the matches and refuses what is not a count.
+func TestCLISearchLimit(t *testing.T) {
 	b := sandbox(t)
 	b.write(map[string]any{"servers": map[string]any{"fixture": definition()}})
-	for _, c := range []struct {
-		limit string
-		count int
-	}{{"-1", 2}, {"0", 0}, {"nonsense", 0}, {"0x2", 2}} {
-		t.Run(c.limit, func(t *testing.T) {
-			r := decode(t, output(t, b.run("search", "fixture", "--limit", c.limit, "--json"))).(map[string]any)
-			equal(t, r["total"], float64(3))
-			equal(t, len(r["matches"].([]any)), c.count)
-		})
+	r := decode(t, output(t, b.run("search", "fixture", "--limit", "2", "--json"))).(map[string]any)
+	equal(t, r["total"], float64(3))
+	equal(t, len(r["matches"].([]any)), 2)
+	for _, limit := range []string{"0", "-1", "nonsense", "1.5"} {
+		refused := b.run("search", "fixture", "--limit", limit)
+		equal(t, refused.status, 2)
+		contains(t, refused.stderr, "--limit takes a whole number of at least 1")
 	}
 }
 
@@ -210,4 +211,88 @@ func TestDisconnectedServer(t *testing.T) {
 	equal(t, row["tools"], float64(0))
 	equal(t, row["error"], "Connection closed")
 	equal(t, row["availability"], "not_checked")
+}
+
+// TestMisuseSaysWhatToTypeInstead pins how a wrongly called command answers: the mistake,
+// the command's usage and where its examples are, on stderr, with exit code 2.
+func TestMisuseSaysWhatToTypeInstead(t *testing.T) {
+	b := sandbox(t)
+	for _, c := range []struct {
+		args []string
+		says string
+	}{
+		{[]string{"serach", "x"}, `there is no "serach" command. Did you mean "search"?`},
+		{[]string{"list", "--jsno"}, "list has no flag --jsno. Did you mean --json?"},
+		{[]string{"add", "docs", "https://example.invalid/mcp", "--bearer-token-env"}, "--bearer-token-env needs a value"},
+		{[]string{"add", "docs", "example.invalid"}, `"example.invalid" is not an http or https address`},
+		{[]string{"search"}, "search needs something to look for, or --server to list one server's tools\n\nUsage: tap search QUERY... [--server NAME] [--limit N] [--json]\n       tap search --server NAME\nRun \"tap search --help\" for examples."},
+		{[]string{"call", "echo"}, `"echo" is not a tool id`},
+	} {
+		r := b.run(c.args...)
+		equal(t, r.status, 2)
+		equal(t, r.stdout, "")
+		contains(t, r.stderr, c.says)
+	}
+	if _, err := os.Stat(b.config); err == nil {
+		t.Fatal("a refused command wrote the config")
+	}
+}
+
+// TestHelpFlagShowsACommandsHelpWithoutRunningIt pins that -h and --help anywhere mean help.
+func TestHelpFlagShowsACommandsHelpWithoutRunningIt(t *testing.T) {
+	b := sandbox(t)
+	for _, args := range [][]string{{"add", "docs", "https://example.invalid/mcp", "--help"}, {"add", "-h"}, {"help", "add"}} {
+		r := b.run(args...)
+		equal(t, r.status, 0)
+		contains(t, r.stdout, "tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes")
+	}
+	if _, err := os.Stat(b.config); err == nil {
+		t.Fatal("asking for help added a server")
+	}
+}
+
+// TestStateChangesAreSaidAndMissingOnesFail pins what add and remove report.
+func TestStateChangesAreSaidAndMissingOnesFail(t *testing.T) {
+	b := sandbox(t)
+	equal(t, output(t, b.run("add", "docs", "https://example.invalid/mcp")), "added docs (http)")
+	equal(t, output(t, b.run("add", "docs", "--", "some-server")), "replaced docs (stdio)")
+	equal(t, output(t, b.run("remove", "docs")), "removed docs")
+	r := b.run("remove", "docs")
+	equal(t, r.status, 1)
+	contains(t, r.stderr, `there is no server named "docs"`)
+}
+
+// TestListExplainsUnavailableServers pins the reasons a person reads, without the layers
+// an error passed through.
+func TestListExplainsUnavailableServers(t *testing.T) {
+	b := sandbox(t)
+	b.write(map[string]any{"servers": map[string]any{"fixture": definition(), "missing": map[string]any{"type": "stdio", "command": []string{"/nonexistent/tap-test-server"}}}})
+	equal(t, output(t, b.run("list")), "fixture  3 tools\nmissing  unavailable: its command was not found: /nonexistent/tap-test-server")
+}
+
+// TestImport pins that an agent's servers are added once, what is left behind is explained,
+// and a dry run changes nothing.
+func TestImport(t *testing.T) {
+	b := sandbox(t)
+	source := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(source, []byte(`{"mcpServers":{
+		"files":{"command":"`+fixtureBin+`","args":["--serve"]},
+		"docs":{"type":"http","url":"https://docs.example.invalid/mcp"},
+		"old":{"type":"sse","url":"https://old.example.invalid/sse"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dry := output(t, b.run("import", source, "--dry-run"))
+	contains(t, dry, "would add files (stdio)")
+	if _, err := os.Stat(b.config); err == nil {
+		t.Fatal("a dry run wrote the config")
+	}
+	added := output(t, b.run("import", source))
+	contains(t, added, "added files (stdio)")
+	contains(t, added, "added docs (http)")
+	contains(t, added, "skipped old: it uses the sse transport")
+	equal(t, b.read(), decode(t, `{"servers":{"files":{"type":"stdio","command":["`+fixtureBin+`","--serve"]},"docs":{"type":"http","url":"https://docs.example.invalid/mcp"}}}`))
+	contains(t, output(t, b.run("import", source)), "has files already")
+	output(t, b.run("add", "docs", "https://other.example.invalid/mcp"))
+	contains(t, output(t, b.run("import", source)), "skipped docs: tap has another server by that name; --force replaces it")
+	contains(t, output(t, b.run("import", source, "--force")), "added docs (http)")
 }

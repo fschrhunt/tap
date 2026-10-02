@@ -4,10 +4,12 @@ package discovery
 
 import (
 	"math"
-	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/fschrhunt/tap/internal/wire"
 )
@@ -24,168 +26,259 @@ type Match struct {
 	Score float64
 }
 
-var camel = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 var stops = map[string]bool{"a": true, "an": true, "the": true, "to": true, "of": true, "for": true, "in": true, "on": true, "with": true, "my": true, "me": true, "please": true, "can": true, "you": true, "i": true, "want": true, "would": true, "like": true, "and": true, "is": true}
 
-// Tokens splits identifiers and Unicode text, preserving words rather than substrings.
+// scan calls word with each lowercase word of s in turn, splitting identifiers and Unicode
+// text into words rather than substrings. A capital after an ASCII lowercase letter or digit
+// starts a new word. The bytes passed are only valid during the call.
+func scan(s string, word func([]byte)) {
+	var buf [64]byte
+	w := buf[:0]
+	var prev rune
+	for _, r := range s {
+		if (prev >= 'a' && prev <= 'z' || prev >= '0' && prev <= '9') && r >= 'A' && r <= 'Z' && len(w) > 0 {
+			word(w)
+			w = w[:0]
+		}
+		prev = r
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			w = append(w, byte(r))
+		case r >= 'A' && r <= 'Z':
+			w = append(w, byte(r)+'a'-'A')
+		case r < utf8.RuneSelf:
+			if len(w) > 0 {
+				word(w)
+				w = w[:0]
+			}
+		default:
+			if lower := unicode.ToLower(r); unicode.IsLetter(lower) || unicode.IsDigit(lower) {
+				w = utf8.AppendRune(w, lower)
+			} else if len(w) > 0 {
+				word(w)
+				w = w[:0]
+			}
+		}
+	}
+	if len(w) > 0 {
+		word(w)
+	}
+}
+
+// Tokens returns the words of s, as scan finds them.
 func Tokens(s string) []string {
-	s = strings.ToLower(camel.ReplaceAllString(s, "$1 $2"))
-	return strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	out := []string{}
+	scan(s, func(w []byte) { out = append(out, string(w)) })
+	return out
+}
+
+// term turns a word into the form it is indexed and asked under: nil for query filler, and
+// English plurals conservatively made singular. It may shorten or change w in place.
+func term(w []byte) []byte {
+	if stops[string(w)] {
+		return nil
+	}
+	if n := len(w); n > 4 && string(w[n-3:]) == "ies" {
+		w = append(w[:n-3], 'y')
+	} else if n > 3 && w[n-1] == 's' && w[n-2] != 's' {
+		w = w[:n-1]
+	}
+	return w
 }
 
 // terms removes query filler and conservatively normalizes English plurals.
 func terms(s string) []string {
 	out := []string{}
-	for _, t := range Tokens(s) {
-		if stops[t] {
-			continue
+	scan(s, func(w []byte) {
+		if w = term(w); w != nil {
+			out = append(out, string(w))
 		}
-		if len(t) > 4 && strings.HasSuffix(t, "ies") {
-			t = t[:len(t)-3] + "y"
-		} else if len(t) > 3 && strings.HasSuffix(t, "s") && !strings.HasSuffix(t, "ss") {
-			t = t[:len(t)-1]
-		}
-		out = append(out, t)
-	}
+	})
 	return out
 }
 
-// schemaText indexes parameter names, descriptions and enum labels, not structural noise.
-func schemaText(v any) string {
-	var b strings.Builder
-	var visit func(any)
-	visit = func(v any) {
-		switch x := v.(type) {
-		case wire.Object:
-			for _, f := range x {
-				switch f.Name {
-				case "description", "title", "enum":
-					b.WriteString(wire.String(f.Value))
-					b.WriteByte(' ')
-				case "properties":
-					if o, ok := f.Value.(wire.Object); ok {
-						for _, p := range o {
-							b.WriteString(p.Name)
-							b.WriteByte(' ')
-							visit(p.Value)
+// schemaWords scans parameter names, descriptions and enum labels, not structural noise.
+func schemaWords(v any, word func([]byte)) {
+	switch x := v.(type) {
+	case wire.Object:
+		for _, f := range x {
+			switch f.Name {
+			case "description", "title", "enum":
+				scan(wire.String(f.Value), word)
+			case "properties":
+				if o, ok := f.Value.(wire.Object); ok {
+					for _, p := range o {
+						scan(p.Name, word)
+						schemaWords(p.Value, word)
+					}
+				}
+			default:
+				schemaWords(f.Value, word)
+			}
+		}
+	case []any:
+		for _, y := range x {
+			schemaWords(y, word)
+		}
+	}
+}
+
+// words calls word with every term of a tool and the field it stands in: 0 the id, 1 the
+// server, 2 the title and description, 3 the schema. The bytes are only valid during the call.
+func words(t Tool, word func(field int, w []byte)) {
+	field := 0
+	emit := func(w []byte) {
+		if w = term(w); w != nil {
+			word(field, w)
+		}
+	}
+	scan(t.ID, emit)
+	field = 1
+	scan(t.Server, emit)
+	field = 2
+	scan(stringField(t.Definition, "title"), emit)
+	scan(stringField(t.Definition, "description"), emit)
+	field = 3
+	schemaWords(t.Definition.Get("inputSchema"), emit)
+}
+
+// tally is what one tool holds of a query: how long each field is, and how often each field
+// has each query word, at counts[4*word+field].
+type tally struct {
+	lengths [4]int32
+	counts  []int32
+}
+
+// count reads every tool once for the words of q, on several processors at once.
+func count(tools []Tool, q []string) []tally {
+	docs := make([]tally, len(tools))
+	counts := make([]int32, 4*len(q)*len(tools))
+	workers := min(runtime.GOMAXPROCS(0), 8, len(tools)/16+1)
+	var wg sync.WaitGroup
+	for part := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := part; i < len(tools); i += workers {
+				d := &docs[i]
+				d.counts = counts[4*len(q)*i : 4*len(q)*(i+1)]
+				words(tools[i], func(f int, w []byte) {
+					d.lengths[f]++
+					for j, word := range q {
+						if string(w) == word {
+							d.counts[4*j+f]++
 						}
 					}
-				default:
-					visit(f.Value)
-				}
+				})
 			}
-		case []any:
-			for _, y := range x {
-				visit(y)
+		}()
+	}
+	wg.Wait()
+	return docs
+}
+
+// Rank performs field-weighted BM25 with stable catalog-order ties. A query that is a tool's
+// name or id, word for word, returns the tools so named. Otherwise the tools that hold every
+// word of the query are returned, and when none does, the tools that hold any: unknown
+// vocabulary does not eliminate relevant tools, and zero overlap returns none.
+//
+// Nothing is kept between queries: each one reads the catalog it is given, which costs less
+// than a millisecond for hundreds of tools and leaves nothing to build before the first.
+func Rank(tools []Tool, query string) []Match {
+	if asked := strings.Join(Tokens(query), " "); asked != "" {
+		named := []Match{}
+		for _, t := range tools {
+			_, name, _ := strings.Cut(t.ID, ".")
+			if strings.Join(Tokens(t.ID), " ") == asked {
+				named = append([]Match{{t, 2000}}, named...)
+			} else if name != "" && strings.Join(Tokens(name), " ") == asked {
+				named = append(named, Match{t, 1000})
 			}
+		}
+		if len(named) > 0 {
+			return named
 		}
 	}
-	visit(v)
-	return b.String()
-}
-
-// Index is an immutable metadata index, safe for concurrent queries until catalogs change.
-type Index struct {
-	tools []Tool
-	docs  []document
-	df    map[string]int
-	avg   [4]float64
-}
-type document struct {
-	fields  [4]map[string]int
-	lengths [4]int
-}
-
-// New indexes a catalog once; callers must not mutate its definitions afterward.
-func New(tools []Tool) *Index {
-	type doc = document
-	docs := make([]doc, len(tools))
-	df := map[string]int{}
-	var avg [4]float64
-	for i, t := range tools {
-		texts := [4]string{t.ID, t.Server, stringField(t.Definition, "title") + " " + stringField(t.Definition, "description"), schemaText(t.Definition.Get("inputSchema"))}
-		seen := map[string]bool{}
-		for f, text := range texts {
-			docs[i].fields[f] = map[string]int{}
-			for _, term := range terms(text) {
-				docs[i].fields[f][term]++
-				docs[i].lengths[f]++
-				seen[term] = true
-			}
-			avg[f] += float64(docs[i].lengths[f])
-		}
-		for term := range seen {
-			df[term]++
-		}
-	}
-	for f := range avg {
-		if len(tools) > 0 {
-			avg[f] = math.Max(1, avg[f]/float64(len(tools)))
-		}
-	}
-	return &Index{tools: tools, docs: docs, df: df, avg: avg}
-}
-
-// Rank indexes and ranks a frozen catalog in one call, useful for cold retrieval evaluation.
-func Rank(tools []Tool, query string) []Match { return New(tools).Search(query) }
-
-// Search performs field-weighted BM25 with coverage preference and stable catalog-order ties.
-// Unknown vocabulary does not eliminate relevant tools; zero overlap returns none.
-func (index *Index) Search(query string) []Match {
 	q := terms(query)
 	if len(q) == 0 {
 		return nil
 	}
-	tools, docs, df, avg := index.tools, index.docs, index.df, index.avg
-	// Correct only unique, one-edit out-of-vocabulary words; never widen known terms.
-	for i, term := range q {
-		if df[term] > 0 || len([]rune(term)) < 5 {
-			continue
-		}
-		candidate := ""
-		ambiguous := false
-		for word := range df {
-			if oneEdit(term, word) {
-				if candidate != "" {
-					ambiguous = true
-					break
-				}
-				candidate = word
+	docs := count(tools, q)
+	df := func(j int) (n int) {
+		for _, d := range docs {
+			if c := d.counts[4*j : 4*j+4]; c[0]+c[1]+c[2]+c[3] > 0 {
+				n++
 			}
 		}
+		return n
+	}
+	// Correct only unique, one-edit out-of-vocabulary words; never widen known terms.
+	corrected := false
+	for j, word := range q {
+		if len([]rune(word)) < 5 || df(j) > 0 {
+			continue
+		}
+		candidate, ambiguous := "", false
+		for _, t := range tools {
+			words(t, func(_ int, w []byte) {
+				// One edit leaves the first or the last letter in place.
+				if (w[0] == word[0] || w[len(w)-1] == word[len(word)-1]) && string(w) != candidate && oneEdit(word, string(w)) {
+					ambiguous = ambiguous || candidate != ""
+					candidate = string(w)
+				}
+			})
+		}
 		if candidate != "" && !ambiguous {
-			q[i] = candidate
+			q[j], corrected = candidate, true
+		}
+	}
+	if corrected {
+		docs = count(tools, q)
+	}
+	var avg [4]float64
+	for _, d := range docs {
+		for f := range avg {
+			avg[f] += float64(d.lengths[f])
+		}
+	}
+	for f := range avg {
+		if len(docs) > 0 {
+			avg[f] = math.Max(1, avg[f]/float64(len(docs)))
 		}
 	}
 	weights := [4]float64{5, 8, 2, 1}
 	idfs := make([]float64, len(q))
-	for i, term := range q {
-		idfs[i] = math.Log(1 + (float64(len(tools)-df[term])+0.5)/(float64(df[term])+0.5))
+	for j := range q {
+		n := float64(df(j))
+		idfs[j] = math.Log(1 + (float64(len(docs))-n+0.5)/(n+0.5))
 	}
-	out := []Match{}
-	for i, t := range tools {
+	out, whole := []Match{}, []Match{}
+	for i, d := range docs {
 		score, covered := 0.0, 0
-		for j, term := range q {
+		for j := range q {
 			found := false
-			idf := idfs[j]
-			for f, counts := range docs[i].fields {
-				tf := float64(counts[term])
+			for f, n := range d.counts[4*j : 4*j+4] {
+				tf := float64(n)
 				if tf == 0 {
 					continue
 				}
 				found = true
-				score += weights[f] * idf * tf * 2.2 / (tf + 1.2*(0.25+0.75*float64(docs[i].lengths[f])/avg[f]))
+				score += weights[f] * idfs[j] * tf * 2.2 / (tf + 1.2*(0.25+0.75*float64(d.lengths[f])/avg[f]))
 			}
 			if found {
 				covered++
 			}
 		}
-		if strings.EqualFold(strings.TrimSpace(query), t.ID) {
-			score += 1000
-		}
 		if score > 0 {
-			out = append(out, Match{t, score * (1 + float64(covered)/float64(len(q)))})
+			m := Match{tools[i], score * (1 + float64(covered)/float64(len(q)))}
+			out = append(out, m)
+			if covered == len(q) {
+				whole = append(whole, m)
+			}
 		}
+	}
+	if len(whole) > 0 {
+		out = whole
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	return out

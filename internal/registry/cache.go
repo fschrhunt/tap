@@ -2,15 +2,20 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fschrhunt/tap/internal/config"
@@ -20,6 +25,9 @@ import (
 
 const catalogTTL = time.Minute
 const maxCatalogBytes = 16 << 20
+
+// indexOpening is the first line of the saved index, and names its layout.
+const indexOpening = `{"version":2,"servers":{`
 
 // catalog is guarded by Engine.mu; published tool objects are immutable.
 type catalog struct {
@@ -32,6 +40,8 @@ type catalog struct {
 	revision     uint64
 	instructions string
 	session      *entry
+	// digest names what the server last answered; a refresh that finds it again keeps tools.
+	digest string
 }
 
 // envDuration accepts zero for deterministic retry tests.
@@ -61,16 +71,33 @@ func definitionFingerprint(def any) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(config.Expand(string(b))+"\x00"+token+"\x00"+os.Getenv("HOME")+"\x00"+os.Getenv("PATH")+"\x00"+inherited)))
 }
 
-// configSnapshot keeps definitions and fingerprints together through fanout.
+// configSnapshot keeps definitions and fingerprints together through fanout, with the state
+// of the file they were read from.
 type configSnapshot struct {
 	servers      wire.Object
 	fingerprints map[string]string
+	file         os.FileInfo
 }
 
-// snapshot reads once per operation and invalidates changed or removed generations.
+// settled is how old a config file's modification time must be before an unchanged time and
+// size are taken to mean unchanged content. It is longer than the coarsest timestamps a
+// filesystem keeps, so an edit made within one tick of the last read is never missed.
+const settled = 2 * time.Second
+
+// snapshot runs once per operation and invalidates changed or removed generations. It reads
+// the config again unless the file is the one it last read, unchanged and settled.
 func (e *Engine) snapshot() (*configSnapshot, error) {
 	e.snapshotMu.Lock()
 	defer e.snapshotMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, statErr := os.Stat(e.Path)
+	if last := e.last; last != nil && statErr == nil && last.file != nil && os.SameFile(file, last.file) &&
+		file.Size() == last.file.Size() && file.ModTime().Equal(last.file.ModTime()) && time.Since(file.ModTime()) > settled {
+		return last, nil
+	}
+	e.last = nil
 	servers, err := config.Load(e.Path)
 	if err != nil {
 		return nil, err
@@ -100,7 +127,11 @@ func (e *Engine) snapshot() (*configSnapshot, error) {
 		e.indexLoaded = true
 		e.loadIndex()
 	}
-	return &configSnapshot{servers: servers, fingerprints: definitions}, nil
+	if statErr != nil {
+		file = nil
+	}
+	e.last = &configSnapshot{servers: servers, fingerprints: definitions, file: file}
+	return e.last, nil
 }
 
 // toolsFor returns tools, stale status and last refresh error together.
@@ -201,15 +232,16 @@ func (e *Engine) liveTools(ctx context.Context, name string, def wire.Object, fi
 	return c.tools, nil
 }
 
-// refresh publishes only complete lists; failures preserve prior tools and back off.
+// refresh publishes only complete lists; failures preserve prior tools and back off. A list
+// with the digest of the last one keeps the tools already decoded and is not saved again.
 func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	defer e.workers.Done()
 	e.mu.Lock()
-	revision := c.revision
+	revision, tools, known := c.revision, c.tools, c.digest
 	e.mu.Unlock()
 	began := time.Now()
 	ent, err := e.connect(e.ctx, name, def, c.fingerprint, quiet)
-	var tools []wire.Object
+	digest := ""
 	if err == nil {
 		defer e.release(ent)
 		if ent.openedAt.After(began) {
@@ -219,17 +251,21 @@ func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 		err = e.acquire(e.ctx)
 		if err == nil {
 			ctx, cancel := context.WithTimeout(e.ctx, remaining)
-			tools, err = listTools(ctx, ent.session)
+			var listed []wire.Object
+			listed, digest, err = listTools(ctx, ent.session, known)
 			err = e.deadlineError(ctx, err)
 			cancel()
 			<-e.slots
+			if err == nil && digest != known {
+				tools = listed
+			}
 		}
 	}
 	e.mu.Lock()
 	if err == nil {
 		c.tools, c.good, c.at = tools, true, time.Now()
 		c.session = ent
-		c.instructions = ent.session.InitializeResult().Instructions
+		c.instructions, c.digest = ent.session.InitializeResult().Instructions, digest
 		if c.revision != revision {
 			c.at = time.Time{}
 		}
@@ -240,7 +276,7 @@ func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	c.err = err
 	close(c.refreshing)
 	c.refreshing = nil
-	if err == nil && e.catalogs[name] == c {
+	if err == nil && digest != known && e.catalogs[name] == c {
 		select {
 		case e.indexDirty <- struct{}{}:
 		default:
@@ -249,43 +285,86 @@ func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	e.mu.Unlock()
 }
 
-// listTools follows bounded cursors, retaining raw stdio and SDK-supported HTTP fields.
-func listTools(ctx context.Context, session *mcp.ClientSession) ([]wire.Object, error) {
-	tools := []wire.Object{}
+// listTools follows bounded cursors and returns the server's tools with the digest of what it
+// answered: raw for stdio, and the SDK-supported fields for HTTP. A server that answers what
+// known names returns no tools, since the caller already holds them; when that answer is a
+// single page, it is not decoded at all.
+func listTools(ctx context.Context, session *mcp.ClientSession, known string) ([]wire.Object, string, error) {
+	instructions := session.InitializeResult().Instructions
+	var pages [][]byte
+	var lists [][]any
 	cursor := ""
 	seen := map[string]bool{}
-	names := map[string]bool{}
 	totalBytes := 0
 	for pageNumber := 0; pageNumber < 100; pageNumber++ {
-		cctx, raw := wire.Capture(ctx)
+		cctx, raw := wire.Take(ctx)
 		result, err := session.ListTools(cctx, &mcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if len(*raw) == 0 {
 			b, err := wire.JSON(result, false)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			*raw = b
 		}
 		totalBytes += len(*raw)
 		if totalBytes > maxCatalogBytes {
-			return nil, fmt.Errorf("tools/list exceeds the 16 MiB catalog limit")
+			return nil, "", fmt.Errorf("tools/list exceeds the 16 MiB catalog limit")
 		}
-		v, err := wire.DecodeExact(*raw)
+		pages = append(pages, *raw)
+		// A first page with the known digest is the whole list it named, so it has no cursor.
+		if pageNumber == 0 && catalogDigest(instructions, pages) == known {
+			return nil, known, nil
+		}
+		v, err := wire.DecodeExactOwned(*raw)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		o, ok := v.(wire.Object)
 		if !ok {
-			return nil, fmt.Errorf("invalid tools/list result")
+			return nil, "", fmt.Errorf("invalid tools/list result")
 		}
-		page, ok := o.Get("tools").([]any)
+		list, ok := o.Get("tools").([]any)
 		if !ok {
-			return nil, fmt.Errorf("invalid tools/list tools")
+			return nil, "", fmt.Errorf("invalid tools/list tools")
 		}
-		for _, t := range page {
+		lists = append(lists, list)
+		cursor, _ = o.Get("nextCursor").(string)
+		if cursor == "" {
+			digest := catalogDigest(instructions, pages)
+			if digest == known {
+				return nil, known, nil
+			}
+			tools, err := shapeTools(lists)
+			return tools, digest, err
+		}
+		if seen[cursor] {
+			return nil, "", fmt.Errorf("repeated tools/list cursor")
+		}
+		seen[cursor] = true
+	}
+	return nil, "", fmt.Errorf("tools/list exceeded 100 pages")
+}
+
+// catalogDigest names a server's answer: its instructions and every page of its tool list.
+// Two answers with one digest hold the same tools, so the second need not be decoded again.
+func catalogDigest(instructions string, pages [][]byte) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d:%s", len(instructions), instructions)
+	for _, page := range pages {
+		h.Write(page)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// shapeTools turns listed pages into tool definitions, refusing empty or repeated names.
+func shapeTools(lists [][]any) ([]wire.Object, error) {
+	tools := []wire.Object{}
+	names := map[string]bool{}
+	for _, list := range lists {
+		for _, t := range list {
 			tool, ok := t.(wire.Object)
 			if !ok {
 				return nil, fmt.Errorf("invalid tool definition")
@@ -309,16 +388,8 @@ func listTools(ctx context.Context, session *mcp.ClientSession) ([]wire.Object, 
 			}
 			tools = append(tools, tool)
 		}
-		cursor = result.NextCursor
-		if cursor == "" {
-			return tools, nil
-		}
-		if seen[cursor] {
-			return nil, fmt.Errorf("repeated tools/list cursor")
-		}
-		seen[cursor] = true
 	}
-	return nil, fmt.Errorf("tools/list exceeded 100 pages")
+	return tools, nil
 }
 
 // reap closes idle unused sessions, preserving their catalogs and active operations.
@@ -356,8 +427,9 @@ func (e *Engine) reapIdle(now time.Time) {
 	}
 }
 
-// loadIndex accepts only an owner-only regular file and matching definitions.
-// Persisted tools are stale so the first lookup revalidates in the background.
+// loadIndex accepts only an owner-only regular file in saveIndex's layout, and from it only
+// servers whose definitions match. Persisted tools are stale so the first lookup revalidates
+// in the background.
 func (e *Engine) loadIndex() {
 	if os.Getenv("TAP_CACHE_DIR") == "off" {
 		return
@@ -376,41 +448,84 @@ func (e *Engine) loadIndex() {
 	if err != nil || !os.SameFile(st, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm()&0077 != 0 || opened.Size() > maxCatalogBytes {
 		return
 	}
-	b, err := io.ReadAll(io.LimitReader(f, maxCatalogBytes+1))
-	if err != nil || len(b) > maxCatalogBytes {
+	b := make([]byte, opened.Size())
+	if _, err = io.ReadFull(f, b); err != nil {
 		return
 	}
-	v, err := wire.DecodeExact(b)
-	if err != nil {
+	// The file is JSON laid out in lines: one that opens each server and one for each of its
+	// tools. Lines are found without reading the JSON, and tools are decoded side by side,
+	// since the first search waits for all of them. Any other shape is not this index.
+	type saved struct {
+		name  string
+		head  wire.Object
+		tools []wire.Object
+		lines [][]byte
+	}
+	var servers []*saved
+	var open *saved
+	lines := bytes.Split(bytes.TrimSuffix(b, []byte("\n")), []byte("\n"))
+	if len(lines) < 2 || string(lines[0]) != indexOpening || string(lines[len(lines)-1]) != "}}" {
 		return
 	}
-	index, ok := v.(wire.Object)
-	if !ok || wire.String(index.Get("version")) != "1" {
-		return
-	}
-	rows, _ := index.Get("servers").(wire.Object)
-	for _, f := range rows {
-		row, ok := f.Value.(wire.Object)
-		if !ok || row.Get("fingerprint") != e.definitions[f.Name] || e.definitions[f.Name] == "" {
-			continue
-		}
-		raw, ok := row.Get("tools").([]any)
-		if !ok {
-			continue
-		}
-		tools := make([]wire.Object, 0, len(raw))
-		for _, t := range raw {
-			tool, ok := t.(wire.Object)
-			if !ok {
-				tools = nil
-				break
+	total := 0
+	for _, line := range lines[1 : len(lines)-1] {
+		line = bytes.TrimSuffix(line, []byte(","))
+		switch {
+		case open == nil && bytes.HasSuffix(line, []byte(`"tools":[`)):
+			v, err := wire.Decode(slices.Concat([]byte("{"), line, []byte("]}}")))
+			row, _ := v.(wire.Object)
+			if err != nil || len(row) != 1 {
+				return
 			}
-			tools = append(tools, tool)
+			head, _ := row[0].Value.(wire.Object)
+			open = &saved{name: row[0].Name, head: head}
+		case open != nil && string(line) == "]}":
+			if open.head.Get("fingerprint") == e.definitions[open.name] {
+				open.tools = make([]wire.Object, len(open.lines))
+				total += len(open.lines)
+				servers = append(servers, open)
+			}
+			open = nil
+		case open != nil && len(line) > 0 && line[0] == '{':
+			open.lines = append(open.lines, line)
+		default:
+			return
 		}
-		if tools != nil {
-			instructions, _ := row.Get("instructions").(string)
-			e.catalogs[f.Name] = &catalog{fingerprint: e.definitions[f.Name], tools: tools, good: true, instructions: instructions}
+	}
+	if open != nil {
+		return
+	}
+	type job struct {
+		to   *wire.Object
+		line []byte
+	}
+	jobs := make([]job, 0, total)
+	for _, s := range servers {
+		for i, line := range s.lines {
+			jobs = append(jobs, job{&s.tools[i], line})
 		}
+	}
+	workers := min(runtime.GOMAXPROCS(0), 8, len(jobs))
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, j := range jobs[len(jobs)*w/workers : len(jobs)*(w+1)/workers] {
+				if v, err := wire.DecodeExactOwned(j.line); err == nil {
+					*j.to, _ = v.(wire.Object)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, s := range servers {
+		if slices.ContainsFunc(s.tools, func(t wire.Object) bool { return t == nil }) {
+			continue
+		}
+		instructions, _ := s.head.Get("instructions").(string)
+		digest, _ := s.head.Get("digest").(string)
+		e.catalogs[s.name] = &catalog{fingerprint: e.definitions[s.name], tools: s.tools, good: true, instructions: instructions, digest: digest}
 	}
 }
 
@@ -437,7 +552,7 @@ func (e *Engine) persistIndex() {
 }
 
 // saveIndex atomically replaces the owner-only index without following its symlink.
-// Only fingerprints and descriptors/guidance are stored, never connection definitions.
+// Only fingerprints, digests and descriptors/guidance are stored, never connection definitions.
 func (e *Engine) saveIndex() {
 	if os.Getenv("TAP_CACHE_DIR") == "off" {
 		return
@@ -445,19 +560,46 @@ func (e *Engine) saveIndex() {
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
 	e.mu.Lock()
-	rows := wire.Object{}
+	type row struct {
+		name  string
+		head  wire.Object
+		tools []wire.Object
+	}
+	var rows []row
 	for name, c := range e.catalogs {
 		if c.good && c.fingerprint == e.definitions[name] {
-			tools := make([]any, len(c.tools))
-			for i, t := range c.tools {
-				tools[i] = t
-			}
-			rows.Set(name, wire.Object{{Name: "fingerprint", Value: c.fingerprint}, {Name: "tools", Value: tools}, {Name: "instructions", Value: c.instructions}})
+			rows = append(rows, row{name, wire.Object{{Name: "fingerprint", Value: c.fingerprint}, {Name: "digest", Value: c.digest}, {Name: "instructions", Value: c.instructions}}, c.tools})
 		}
 	}
 	e.mu.Unlock()
-	b, err := wire.JSON(wire.Object{{Name: "version", Value: 1}, {Name: "servers", Value: rows}}, false)
-	if err != nil || len(b) > maxCatalogBytes {
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+	// One line opens each server and one holds each tool; loadIndex reads it by lines.
+	b := []byte(indexOpening)
+	for i, r := range rows {
+		name, _ := wire.JSON(r.name, false)
+		head, err := wire.JSON(r.head, false)
+		if err != nil {
+			return
+		}
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(append(append(append(b, '\n'), name...), ':'), head[:len(head)-1]...)
+		b = append(b, `,"tools":[`...)
+		for j, tool := range r.tools {
+			line, err := wire.JSON(tool, false)
+			if err != nil {
+				return
+			}
+			if j > 0 {
+				b = append(b, ',')
+			}
+			b = append(append(b, '\n'), line...)
+		}
+		b = append(b, "\n]}"...)
+	}
+	b = append(b, "\n}}\n"...)
+	if len(b) > maxCatalogBytes {
 		return
 	}
 	path := e.Path + ".tools.json"

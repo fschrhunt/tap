@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- `tap auth NAME` signs in to an MCP server through your browser, and tap renews the sign-in
+  by itself. It follows the MCP authorization spec, OAuth with the SDK's client: discovery,
+  client registration, PKCE. `--no-browser` and a pasted address cover machines
+  reached over SSH; `--client-id` covers providers that do not register clients. Sign-ins are
+  kept in an owner-only file beside the config. A server waiting for one says so in `tap list`
+  and in searches: `needs you to sign in: run "tap auth NAME"`.
+- `tap import` adds the servers that Claude Code, Codex, OpenCode, Cursor and VS Code already
+  have, or those in any config file you name. `--dry-run` shows what it would do. It only
+  reads the agents' files.
+- A command line for people. Run in a terminal with no arguments, `tap` prints a short
+  introduction instead of waiting silently. `-h` and `--help` work on every command and never
+  run it; help leads with examples. Unknown commands and flags are errors that name the
+  nearest real one, where they used to be ignored or searched for. Errors say what to do next,
+  and reasons a server is unavailable are written for a person.
+- **Changed:** a command called wrongly now exits 2 and prints its usage. `tap call` exits 1
+  when the tool reports an error, and `tap remove` when there is no such server; both used to
+  exit 0. `tap search` needs a query or `--server`, and `--limit` a whole number of at least 1.
+  `tap add` refuses an address that is not http or https, and says `replaced` when the name
+  existed. `tap list` asks each server afresh instead of printing a saved catalog marked stale;
+  `tap list --cached` prints the saved one. Text output is aligned in columns; use `--json` in
+  scripts.
+- **Changed:** the two tools an agent loads take about 300 tokens, down from about 870 with
+  references described. `plugin_call` offers `tool` and `arguments`; result references, their
+  fields and their guidance are offered only when `TAP_REFERENCES=on` is set where tap runs,
+  and are refused with `reference_unavailable` otherwise.
+- **Changed:** a search returns the tools that hold every word of the query, and only when none
+  does, the tools that hold any. A query that is a tool's name or id returns that tool. Results
+  used to include every tool sharing one word, so `get me` no longer buries `github.get_me`.
+  Scores and their order are otherwise the same, and the frozen retrieval benchmark is unchanged
+  at 95.8% recall@1 with a third of the bytes in the top eight definitions.
+- Faster first answers, with less memory. JSON is read and written in one pass. Searches read
+  the catalogs directly instead of building an index first. The saved tool index is laid out
+  one tool to a line, read side by side, and read while a serving tap answers its first
+  messages. A server that answers the tool list it last answered is recognised by digest and
+  is not decoded, or saved, again; over stdio the SDK no longer decodes tool lists a second
+  time. An unchanged, settled config file is not read again on every search and call. With five
+  servers and 213 real tools, a cold tap is ready in 3.3 ms and returns a first tool result in
+  7.5 ms, where the build before this work took 18.4 ms, and its memory high-water mark is
+  17 MiB, down from 25 MiB: medians of 30 local Linux/amd64 runs.
 - Agent-oriented discovery while retaining two MCP tools: provider-scoped BM25 ranking, Unicode
   tokenization, conservative typo recovery, server browsing, exact inspection, paging and adaptive
   schema disclosure. Full schemas are never truncated; output schemas and untrusted server guidance

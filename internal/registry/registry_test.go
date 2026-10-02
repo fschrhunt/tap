@@ -646,3 +646,81 @@ func TestFanoutUsesConfigSnapshot(t *testing.T) {
 		t.Fatal("next call did not see config removal")
 	}
 }
+
+// TestSettledConfigIsNotReadAgain pins when a snapshot may be reused: only while the config
+// file is unchanged and its modification time is old enough to trust.
+func TestSettledConfigIsNotReadAgain(t *testing.T) {
+	e := testEngine(t, wire.Object{})
+	first, err := e.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := e.snapshot(); again == first {
+		t.Fatal("a config written a moment ago was not read again")
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(e.Path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	settledOnce, _ := e.snapshot()
+	if again, _ := e.snapshot(); again != settledOnce {
+		t.Fatal("a settled, unchanged config was read again")
+	}
+	if err := os.WriteFile(e.Path, []byte(`{"servers":{"added":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(e.Path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := e.snapshot()
+	if err != nil || !changed.servers.Has("added") {
+		t.Fatalf("a config of another size with the same time was not read again: %v, %v", changed, err)
+	}
+}
+
+// TestServerThatWantsASignInSaysHowToGiveIt pins what a search reports for an OAuth server
+// tap has no sign-in for.
+func TestServerThatWantsASignInSaysHowToGiveIt(t *testing.T) {
+	guarded := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="http://`+r.Host+`/.well-known/oauth-protected-resource"`)
+		http.Error(w, "sign in first", http.StatusUnauthorized)
+	}))
+	t.Cleanup(guarded.Close)
+	row := listing(t, testEngine(t, definitions(guarded.URL))).Get("integrations").([]any)[0].(wire.Object)
+	if got := wire.String(row.Get("error")); got != `needs you to sign in: run "tap auth test"` {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+// TestUnchangedListKeepsCatalog pins the digest: a refresh that finds the list a server last
+// answered keeps the tools already decoded, and one that finds another list replaces them.
+func TestUnchangedListKeepsCatalog(t *testing.T) {
+	p := newPeer(t, nil)
+	e := testEngine(t, definitions(p.url))
+	listing(t, e)
+	snapshot, err := e.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := snapshot.servers.Get("test").(wire.Object)
+	refresh := func() []wire.Object {
+		t.Helper()
+		tools, err := e.liveTools(context.Background(), "test", def, snapshot.fingerprints["test"], true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tools
+	}
+	first, lists := refresh(), p.lists.Load()
+	again := refresh()
+	if p.lists.Load() == lists {
+		t.Fatal("the second refresh did not ask the server")
+	}
+	if &again[0] != &first[0] {
+		t.Fatal("an unchanged list was decoded again")
+	}
+	addTool(p.server, "second")
+	if changed := refresh(); len(changed) != 2 {
+		t.Fatalf("a changed list was not taken: %d tools", len(changed))
+	}
+}

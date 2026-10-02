@@ -1,133 +1,169 @@
-// Package cli dispatches tap's shell commands. Bare invocations serve MCP; all
-// other commands use the same resident engine, drain child stderr and then close.
+// Package cli is tap's command line. Run bare by an agent, tap serves MCP; every other
+// invocation is a command for a person, on the same engine, which is closed before returning.
+//
+// Output a person asked for goes to stdout; what tap says about it goes to stderr. Exit codes
+// are 0 for success, 1 for a command that failed, and 2 for a command that was called wrongly.
 package cli
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
-	"github.com/fschrhunt/tap/internal/remote"
 	"io"
+	"net/url"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/fschrhunt/tap/internal/agents"
+	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
 	"github.com/fschrhunt/tap/internal/registry"
+	"github.com/fschrhunt/tap/internal/remote"
 	"github.com/fschrhunt/tap/internal/server"
 	"github.com/fschrhunt/tap/internal/wire"
+	"golang.org/x/term"
 )
 
-const usage = `tap %s — Less noise. Better agents.
+// misuse is a mistake in how a command was called. It is reported with the command's usage
+// and exits 2.
+type misuse struct{ command, message string }
 
-  tap                      run the MCP server over stdio (what a harness spawns)
-  tap list                 list configured integrations and their tool counts
-  tap add <name> <url>     add a streamable-HTTP server
-  tap add <name> -- <cmd>  add a stdio server (everything after -- is the command)
-  tap remove <name>        remove a server
-  tap search <query>       find tools, with the schemas needed to call them
-  tap inspect <server.tool> inspect a complete tool contract
-  tap refresh [server]     refresh cached metadata and check availability
-  tap call <server.tool> [k=v ...] [--args '<json>']
-  tap remote serve [--addr 127.0.0.1:7777] [--tls-cert FILE --tls-key FILE]
-  tap remote use URL [--token-env NAME] [--allow-insecure]
-  tap remote off           return to local connectors
-  tap remote status        print the relay endpoint
-  tap path                 print the config file tap reads
-  tap version              print the version
+func (m *misuse) Error() string { return m.message }
 
-Add flags: --env K=V, --header K=V, --cwd DIR, --bearer-token-env NAME
-           --allow-tool GLOB, --deny-tool GLOB, --reference-to SERVER,
-           --idle-timeout-ms N (stdio idle override; backend state is lost)
-           (--env, --header and policy flags may repeat)
-Other flags: --json prints raw output; --limit N caps search results.
-Search flags: --server NAME, --detail auto|full|summary, --offset N,
-              --max-bytes N, --refresh. Default CLI detail: full.
-             --local uses local connectors for add/remove/list/search/call/inspect/refresh.
-Remote serve requires TAP_REMOTE_TOKEN; TAP_REMOTE_ADMIN_TOKEN overrides admin auth.
-Nonloopback HTTP requires --allow-insecure on both serve and use.`
+func wrong(command, format string, args ...any) error {
+	return &misuse{command, fmt.Sprintf(format, args...)}
+}
 
-// Run executes a command and returns its process exit code, writing only CLI output.
+// shell is one invocation: where it writes, whether a person is watching, and the engine.
+type shell struct {
+	ctx         context.Context
+	engine      *registry.Engine
+	out, errOut io.Writer
+	// watched is true when stderr is a terminal: hints and progress are for a person, and are
+	// left out of logs and pipes.
+	watched bool
+	// plain holds the arguments after --, which are never flags.
+	plain []string
+}
+
+// terminal reports whether w is an interactive terminal.
+func terminal(w any) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+// Run executes a command and returns its process exit code.
 func Run(ctx context.Context, args []string, version string, stdout, stderr io.Writer) int {
 	e := registry.New(config.Path(), version)
 	defer e.Close()
-	status, err := run(ctx, append([]string(nil), args...), e, stdout, stderr)
-	if err != nil {
-		fmt.Fprintln(stderr, "tap: "+registry.Message(err))
+	s := &shell{ctx: ctx, engine: e, out: stdout, errOut: stderr, watched: terminal(stderr)}
+	status, err := s.run(append([]string(nil), args...))
+	if err == nil {
+		return status
+	}
+	fmt.Fprintln(stderr, "tap: "+registry.Message(err))
+	var m *misuse
+	if !errors.As(err, &m) {
 		return 1
 	}
-	return status
-}
-
-// take removes the first named flag and its following value, if present.
-func take(args *[]string, name string) (string, bool) {
-	for i, s := range *args {
-		if s == name {
-			value := ""
-			hasValue := i+1 < len(*args)
-			end := i + 1
-			if end < len(*args) {
-				value = (*args)[end]
-				end++
-			}
-			*args = append((*args)[:i], (*args)[end:]...)
-			return value, hasValue
+	if t := find(m.command); t != nil {
+		fmt.Fprintln(stderr)
+		for i, line := range t.usage {
+			fmt.Fprintln(stderr, map[bool]string{true: "Usage: ", false: "       "}[i == 0]+line)
 		}
+		fmt.Fprintf(stderr, "Run \"tap %s --help\" for examples.\n", m.command)
+	} else {
+		fmt.Fprintln(stderr, "Run \"tap --help\" for the commands.")
 	}
-	return "", false
+	return 2
 }
 
-// takeValue distinguishes an absent option from a present option missing its value.
-func takeValue(args *[]string, name string) (string, bool, error) {
-	for i, s := range *args {
-		if s == name {
-			if i+1 == len(*args) {
-				return "", true, fmt.Errorf("%s needs a value", name)
-			}
-			value, _ := take(args, name)
-			return value, true, nil
-		}
+// hint tells a watching person what to do next.
+func (s *shell) hint(format string, args ...any) {
+	if s.watched {
+		fmt.Fprintf(s.errOut, format+"\n", args...)
 	}
-	return "", false, nil
 }
 
-// boolean removes exactly one occurrence of a boolean option.
-func boolean(args *[]string, name string) bool {
-	for i, s := range *args {
-		if s == name {
-			*args = append((*args)[:i], (*args)[i+1:]...)
-			return true
-		}
+// during shows a watching person that tap is waiting on the network, once work has run long
+// enough to look stuck, and clears the line when the work is done.
+func (s *shell) during(message string, work func() error) error {
+	if !s.watched {
+		return work()
 	}
-	return false
+	shown := make(chan bool, 1)
+	timer := time.AfterFunc(200*time.Millisecond, func() { fmt.Fprint(s.errOut, message); shown <- true })
+	err := work()
+	if !timer.Stop() {
+		<-shown
+		fmt.Fprint(s.errOut, "\r\033[K")
+	}
+	return err
 }
 
-// pairs parses repeated KEY=VALUE options in insertion order.
-func pairs(args *[]string, name string) (wire.Object, error) {
-	o := wire.Object{}
+// repeated collects a flag that may be given more than once.
+type repeated []string
+
+func (r *repeated) String() string     { return strings.Join(*r, ",") }
+func (r *repeated) Set(v string) error { *r = append(*r, v); return nil }
+
+// parse reads a command's flags wherever they stand among its arguments and returns the
+// arguments. It turns the flag package's errors into ones that say what to type instead.
+func parse(command string, fs *flag.FlagSet, args []string) ([]string, error) {
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	positional := []string{}
 	for {
-		index := -1
-		for i, s := range *args {
-			if s == name {
-				index = i
-				break
+		if err := fs.Parse(args); err != nil {
+			text := err.Error()
+			if name, ok := strings.CutPrefix(text, "flag provided but not defined: -"); ok {
+				name = "--" + strings.TrimLeft(name, "-")
+				known := []string{}
+				fs.VisitAll(func(f *flag.Flag) {
+					if len(f.Name) > 1 {
+						known = append(known, "--"+f.Name)
+					}
+				})
+				if meant := nearest(name, known); meant != "" {
+					return nil, wrong(command, "%s has no flag %s. Did you mean %s?", command, name, meant)
+				}
+				return nil, wrong(command, "%s has no flag %s", command, name)
 			}
+			if name, ok := strings.CutPrefix(text, "flag needs an argument: -"); ok {
+				return nil, wrong(command, "--%s needs a value", strings.TrimLeft(name, "-"))
+			}
+			return nil, wrong(command, "%s", strings.Replace(text, " -", " --", 1))
 		}
-		if index < 0 {
-			return o, nil
+		args = fs.Args()
+		if len(args) == 0 {
+			return positional, nil
 		}
-		if index+1 == len(*args) {
-			return nil, fmt.Errorf("%s needs a value", name)
-		}
-		value, _ := take(args, name)
+		positional, args = append(positional, args[0]), args[1:]
+	}
+}
+
+// pairs turns KEY=VALUE flags into an object, in the order given.
+func pairs(command, name string, values []string) (wire.Object, error) {
+	o := wire.Object{}
+	for _, value := range values {
 		eq := strings.Index(value, "=")
 		if eq < 1 {
-			return nil, fmt.Errorf("expected %s KEY=VALUE, got \"%s\"", name, value)
+			return nil, wrong(command, "--%s takes KEY=VALUE, and \"%s\" is not that", name, value)
 		}
 		o.Set(value[:eq], value[eq+1:])
 	}
+	return o, nil
 }
 
-// print emits a value with the same JSON indentation and trailing newline as Node.
+// print writes a value with the JSON indentation and trailing newline tap has always used.
 func print(w io.Writer, value any, json bool) {
 	if json {
 		b, _ := wire.JSON(value, true)
@@ -137,356 +173,585 @@ func print(w io.Writer, value any, json bool) {
 	}
 }
 
-// run preserves tap's permissive option dispatch, including command arguments after --.
-func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.Writer) (int, error) {
-	if len(args) > 0 && args[0] == "remote" {
-		return remoteCommand(ctx, args[1:], e.Path, e.Version, out)
-	}
-	local := false
-	// Flags after -- belong to the connector command.
+// run dispatches one invocation.
+func (s *shell) run(args []string) (int, error) {
+	e := s.engine
+	// Arguments after -- belong to a server's command, so help and flags are looked for before it.
+	before, after, split := args, []string(nil), false
 	for i, arg := range args {
 		if arg == "--" {
-			break
-		}
-		if arg == "--local" {
-			args = append(args[:i], args[i+1:]...)
-			local = true
+			before, after, split = args[:i], args[i+1:], true
 			break
 		}
 	}
-	// Parse call input before opening a backend, preserving CLI JSON diagnostics.
-	if len(args) > 1 && args[0] == "call" {
-		callArgs := append([]string(nil), args[2:]...)
-		boolean(&callArgs, "--json")
-		if _, err := toolArgs(callArgs); err != nil {
-			return 1, err
+	if len(before) == 0 && !split {
+		// A person who runs tap bare gets help; an agent, whose end is a pipe, gets the server.
+		if terminal(os.Stdin) {
+			brief(s.out, e.Version)
+			return 0, nil
 		}
-	}
-	var backend server.Backend = e
-	var relay *remote.Client
-	if !local && (len(args) == 0 || args[0] == "add" || args[0] == "remove" || args[0] == "search" || args[0] == "call" || args[0] == "list" || args[0] == "inspect" || args[0] == "refresh") {
-		cfg, err := config.LoadRemote(e.Path)
+		backend, closer, err := s.backend(false)
 		if err != nil {
 			return 1, err
 		}
-		if cfg != nil {
-			relay, err = remote.New(*cfg, e.Version)
-			if err != nil {
-				return 1, err
-			}
-			defer relay.Close()
-			backend = relay
+		defer closer()
+		if backend == server.Backend(e) {
+			// The agent's first search usually comes a moment after it starts tap.
+			go e.Warm()
 		}
+		return 0, server.Serve(s.ctx, backend, e.Version)
 	}
-	add := func(name string, def wire.Object) error {
-		if relay != nil {
-			_, err := relay.Edit(ctx, name, def)
-			return err
-		}
-		return config.Add(e.Path, name, def)
+	if len(before) == 0 {
+		return 2, wrong("", "a command comes before --")
 	}
-	remove := func(name string) (bool, error) {
-		if relay != nil {
-			return relay.Edit(ctx, name, nil)
-		}
-		return config.Remove(e.Path, name)
-	}
-	if len(args) == 0 {
-		return 0, server.Serve(ctx, backend, e.Version)
-	}
-	command := args[0]
-	args = args[1:]
-	rest := []string{}
-	for i, s := range args {
-		if s == "--" {
-			rest = append(rest, args[i+1:]...)
-			args = args[:i]
-			rest = append([]string{"--"}, rest...)
+	command, rest := before[0], before[1:]
+	for _, arg := range rest {
+		if arg == "-h" || arg == "--help" {
+			rest = []string{command}
+			command = "help"
 			break
 		}
 	}
-	json := boolean(&args, "--json")
+	s.plain = after
 	switch command {
-	case "help", "-h", "--help":
-		print(out, fmt.Sprintf(usage, e.Version), false)
+	case "-h", "--help":
+		full(s.out, e.Version)
 		return 0, nil
-	case "version", "-v", "--version":
-		print(out, e.Version, false)
+	case "help":
+		if len(rest) == 0 {
+			full(s.out, e.Version)
+			return 0, nil
+		}
+		t := find(rest[0])
+		if t == nil {
+			return 2, s.unknown(rest[0])
+		}
+		explain(s.out, t)
+		return 0, nil
+	case "version", "--version", "-v":
+		print(s.out, e.Version, false)
 		return 0, nil
 	case "path":
-		print(out, e.Path, false)
+		if len(rest) > 0 {
+			return 2, wrong("path", "path takes no arguments")
+		}
+		print(s.out, e.Path, false)
 		return 0, nil
 	case "add":
-		if len(args) == 0 || args[0] == "" {
-			return 1, fmt.Errorf("usage: tap add <name> <url> | tap add <name> -- <command> [args...]")
-		}
-		name := args[0]
-		args = args[1:]
-		env, err := pairs(&args, "--env")
-		if err != nil {
-			return 1, err
-		}
-		headers, err := pairs(&args, "--header")
-		if err != nil {
-			return 1, err
-		}
-		cwd, _ := take(&args, "--cwd")
-		bearer, _ := take(&args, "--bearer-token-env")
-		policy := wire.Object{}
-		for _, f := range []struct{ flag, key string }{{"--allow-tool", "allow"}, {"--deny-tool", "deny"}, {"--reference-to", "referenceTo"}} {
-			values := []any{}
-			for {
-				v, ok, err := takeValue(&args, f.flag)
-				if err != nil {
-					return 1, err
-				}
-				if !ok {
-					break
-				}
-				if v == "" {
-					return 1, fmt.Errorf("%s needs a nonempty value", f.flag)
-				}
-				if f.key != "referenceTo" {
-					if _, err := path.Match(v, ""); err != nil {
-						return 1, fmt.Errorf("%s needs a valid glob pattern", f.flag)
-					}
-				}
-				values = append(values, v)
-			}
-			if len(values) > 0 {
-				policy.Set(f.key, values)
-			}
-		}
-		idle, idleSet, err := takeValue(&args, "--idle-timeout-ms")
-		if err != nil {
-			return 1, err
-		}
-		var idleMS int
-		if idleSet {
-			var err error
-			idleMS, err = strconv.Atoi(idle)
-			if err != nil || idleMS < 1 || idleMS > 86400000 {
-				return 1, fmt.Errorf("--idle-timeout-ms expects 1..86400000")
-			}
-		}
-		if len(rest) > 0 {
-			if len(rest) == 1 {
-				return 1, fmt.Errorf("usage: tap add <name> -- <command> [args...]")
-			}
-			def := wire.Object{{Name: "type", Value: "stdio"}, {Name: "command", Value: rest[1:]}}
-			if len(policy) > 0 {
-				def.Set("policy", policy)
-			}
-			if idleSet {
-				def.Set("idleTimeoutMs", idleMS)
-			}
-			if len(env) > 0 {
-				def.Set("env", env)
-			}
-			if cwd != "" {
-				def.Set("cwd", cwd)
-			}
-			if err = add(name, def); err != nil {
-				return 1, err
-			}
-			print(out, "added "+name+" (stdio)", false)
-			return 0, nil
-		}
-		if len(args) == 0 || args[0] == "" {
-			return 1, fmt.Errorf("usage: tap add <name> <url> | tap add <name> -- <command> [args...]")
-		}
-		def := wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: args[0]}}
-		if idleSet {
-			return 1, fmt.Errorf("--idle-timeout-ms is only valid for stdio servers")
-		}
-		if len(policy) > 0 {
-			def.Set("policy", policy)
-		}
-		if len(headers) > 0 {
-			def.Set("headers", headers)
-		}
-		if bearer != "" {
-			def.Set("bearerTokenEnv", bearer)
-		}
-		if err = add(name, def); err != nil {
-			return 1, err
-		}
-		print(out, "added "+name, false)
-		return 0, nil
+		return s.add(rest, after, split)
 	case "remove":
-		if len(args) == 0 || args[0] == "" {
-			return 1, fmt.Errorf("usage: tap remove <name>")
-		}
-		removed, err := remove(args[0])
-		if err != nil {
-			return 1, err
-		}
-		if removed {
-			print(out, "removed "+args[0], false)
-		} else {
-			print(out, "no server named "+args[0], false)
-		}
-		return 0, nil
+		return s.remove(rest)
 	case "list":
-		var result wire.Object
-		var err error
-		if boolean(&args, "--refresh") {
-			result, err = backend.Refresh(ctx, "", true)
-		} else {
-			result, err = backend.Listing(ctx, true)
-		}
-		if err != nil {
-			return 1, err
-		}
-		if json {
-			print(out, result, true)
-			return 0, nil
-		}
-		rows := result.Get("integrations").([]any)
-		if len(rows) == 0 {
-			if relay != nil {
-				print(out, "no servers configured (remote)", false)
-			} else {
-				print(out, "no servers configured ("+e.Path+")", false)
-			}
-			return 0, nil
-		}
-		lines := []string{}
-		for _, v := range rows {
-			row := v.(wire.Object)
-			summary := fmt.Sprintf("%v tools", row.Get("tools"))
-			if row.Has("error") {
-				summary = "unavailable: " + wire.String(row.Get("error"))
-			}
-			if row.Get("source") == "cache" {
-				summary += " (cached; availability not checked)"
-			}
-			if row.Get("stale") == true {
-				summary += " (stale catalog)"
-			}
-			lines = append(lines, wire.String(row.Get("server"))+" — "+summary)
-		}
-		print(out, strings.Join(lines, "\n"), false)
-		return 0, nil
+		return s.list(rest)
 	case "refresh":
-		if len(args) > 1 {
-			return 1, fmt.Errorf("usage: tap refresh [server]")
-		}
-		server := ""
-		if len(args) > 0 {
-			server = args[0]
-		}
-		result, err := backend.Refresh(ctx, server, true)
-		if err != nil {
-			return 1, err
-		}
-		print(out, result, true)
-		return 0, nil
+		return s.refresh(rest)
 	case "inspect":
-		if len(args) != 1 {
-			return 1, fmt.Errorf("usage: tap inspect <server.tool>")
-		}
-		result, err := backend.Discover(ctx, registry.SearchOptions{IDs: args, Detail: "full", Limit: 25, MaxBytes: 16777216}, true)
-		if err != nil {
-			return 1, err
-		}
-		print(out, result, true)
-		return 0, nil
+		return s.inspect(rest)
 	case "search":
-		limit := float64(8)
-		raw, present := take(&args, "--limit")
-		if present {
-			limit = wire.Number(raw)
-		}
-		server, _, err := takeValue(&args, "--server")
-		if err != nil {
-			return 1, err
-		}
-		detail, ok, err := takeValue(&args, "--detail")
-		if err != nil {
-			return 1, err
-		}
-		if !ok {
-			detail = "full"
-		}
-		if detail != "auto" && detail != "full" && detail != "summary" {
-			return 1, fmt.Errorf("--detail expects auto, full or summary")
-		}
-		offset := 0
-		budget := 16777216
-		for _, f := range []struct {
-			flag     string
-			dest     *int
-			min, max int
-		}{{"--offset", &offset, 0, 1000000}, {"--max-bytes", &budget, 1024, 16777216}} {
-			raw, ok, err := takeValue(&args, f.flag)
-			if err != nil {
-				return 1, err
-			}
-			if ok {
-				v, err := strconv.Atoi(raw)
-				if err != nil || v < f.min || v > f.max {
-					return 1, fmt.Errorf("%s expects %d..%d", f.flag, f.min, f.max)
-				}
-				*f.dest = v
-			}
-		}
-		refresh := boolean(&args, "--refresh")
-		result, err := backend.Discover(ctx, registry.SearchOptions{Query: strings.Join(args, " "), Server: server, Detail: detail, Limit: limit, Offset: offset, MaxBytes: budget, Refresh: refresh}, true)
-		if err != nil {
-			return 1, err
-		}
-		if json {
-			print(out, result, true)
-			return 0, nil
-		}
-		matches := result.Get("matches").([]any)
-		lines := []string{}
-		for _, v := range matches {
-			t := v.(wire.Object)
-			desc, _ := t.Get("description").(string)
-			id := wire.String(t.Get("id"))
-			if t.Get("stale") == true {
-				id += " (stale catalog)"
-			}
-			lines = append(lines, strings.TrimRight(id+"\n  "+desc, " \t\r\n"))
-		}
-		if len(lines) == 0 {
-			hint, _ := result.Get("hint").(string)
-			if hint == "" {
-				hint = "no matching tools for \"" + wire.String(result.Get("query")) + "\""
-			}
-			lines = append(lines, hint)
-		}
-		total := int(wire.Number(wire.String(result.Get("total"))))
-		if result.Has("nextOffset") {
-			next := int(wire.Number(wire.String(result.Get("nextOffset"))))
-			lines = append(lines, fmt.Sprintf("(%d more; continue with --offset %d)", total-next, next))
-		}
-		for _, v := range result.Get("unavailable").([]any) {
-			row := v.(wire.Object)
-			lines = append(lines, "unavailable: "+wire.String(row.Get("server"))+" — "+wire.String(row.Get("error")))
-		}
-		print(out, strings.Join(lines, "\n"), false)
-		return 0, nil
+		return s.search(rest)
 	case "call":
-		if len(args) == 0 || args[0] == "" {
-			return 1, fmt.Errorf("usage: tap call <server.tool> [key=value ...]")
-		}
-		id := args[0]
-		args = args[1:]
-		values, err := toolArgs(args)
+		return s.call(rest)
+	case "import":
+		return s.imports(rest)
+	case "auth":
+		return s.auth(rest)
+	case "remote":
+		return s.remote(rest)
+	}
+	return 2, s.unknown(command)
+}
+
+// unknown names a command tap does not have and, when it can, the one that was meant.
+func (s *shell) unknown(command string) error {
+	switch command {
+	case "serve", "server", "mcp", "start", "run":
+		return wrong("", "there is no \"%s\" command. Run with no command, tap serves MCP: that is how an agent starts it", command)
+	}
+	names := []string{}
+	for _, t := range topics {
+		names = append(names, t.name)
+	}
+	if meant := nearest(command, names); meant != "" {
+		return wrong("", "there is no \"%s\" command. Did you mean \"%s\"?", command, meant)
+	}
+	return wrong("", "there is no \"%s\" command", command)
+}
+
+// backend returns the registry a command works on: the selected remote, or this machine's
+// when none is selected or local is asked for. The second result releases it.
+func (s *shell) backend(local bool) (server.Backend, func(), error) {
+	if !local {
+		cfg, err := config.LoadRemote(s.engine.Path)
 		if err != nil {
+			return nil, nil, err
+		}
+		if cfg != nil {
+			relay, err := remote.New(*cfg, s.engine.Version)
+			if err != nil {
+				return nil, nil, err
+			}
+			return relay, relay.Close, nil
+		}
+	}
+	return s.engine, func() {}, nil
+}
+
+// add saves one server: an address for an HTTP server, or the command after -- for a stdio one.
+func (s *shell) add(args, command []string, split bool) (int, error) {
+	fs := flag.NewFlagSet("add", flag.ContinueOnError)
+	var envs, headers repeated
+	fs.Var(&envs, "env", "")
+	fs.Var(&headers, "header", "")
+	cwd := fs.String("cwd", "", "")
+	bearer := fs.String("bearer-token-env", "", "")
+	var allow, deny, referenceTo repeated
+	fs.Var(&allow, "allow-tool", "")
+	fs.Var(&deny, "deny-tool", "")
+	fs.Var(&referenceTo, "reference-to", "")
+	idle := fs.Int("idle-timeout-ms", 0, "")
+	local := fs.Bool("local", false, "")
+	args, err := parse("add", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) == 0 || args[0] == "" {
+		return 2, wrong("add", "add needs a name for the server")
+	}
+	name := args[0]
+	env, err := pairs("add", "env", envs)
+	if err != nil {
+		return 2, err
+	}
+	header, err := pairs("add", "header", headers)
+	if err != nil {
+		return 2, err
+	}
+	policy := wire.Object{}
+	for _, f := range []struct {
+		flag, key string
+		values    []string
+	}{{"allow-tool", "allow", allow}, {"deny-tool", "deny", deny}, {"reference-to", "referenceTo", referenceTo}} {
+		list := []any{}
+		for _, v := range f.values {
+			if v == "" {
+				return 2, wrong("add", "--%s needs a value", f.flag)
+			}
+			if _, err := path.Match(v, ""); err != nil && f.key != "referenceTo" {
+				return 2, wrong("add", "--%s takes a pattern like \"read_*\", and \"%s\" is not one", f.flag, v)
+			}
+			list = append(list, v)
+		}
+		if len(list) > 0 {
+			policy.Set(f.key, list)
+		}
+	}
+	idleSet := false
+	fs.Visit(func(f *flag.Flag) { idleSet = idleSet || f.Name == "idle-timeout-ms" })
+	if idleSet && (*idle < 1 || *idle > 86400000) {
+		return 2, wrong("add", "--idle-timeout-ms takes a number of milliseconds from 1 to 86400000")
+	}
+	var def wire.Object
+	kind := "http"
+	switch {
+	case split:
+		kind = "stdio"
+		if len(command) == 0 {
+			return 2, wrong("add", "nothing follows --; the server's command goes there")
+		}
+		if len(args) > 1 {
+			return 2, wrong("add", "\"%s\" stands before --, where only the name and flags go", args[1])
+		}
+		if len(header) > 0 || *bearer != "" {
+			return 2, wrong("add", "--header and --bearer-token-env are for an address, not a command")
+		}
+		argv := make([]any, len(command))
+		for i, part := range command {
+			argv[i] = part
+		}
+		def = wire.Object{{Name: "type", Value: "stdio"}, {Name: "command", Value: argv}}
+		if len(env) > 0 {
+			def.Set("env", env)
+		}
+		if *cwd != "" {
+			def.Set("cwd", *cwd)
+		}
+		if idleSet {
+			def.Set("idleTimeoutMs", *idle)
+		}
+	case len(args) == 2:
+		at, err := url.Parse(args[1])
+		if err != nil || at.Host == "" || (at.Scheme != "http" && at.Scheme != "https") {
+			return 2, wrong("add", "\"%s\" is not an http or https address. For a command, put it after --", args[1])
+		}
+		if len(env) > 0 || *cwd != "" || idleSet {
+			return 2, wrong("add", "--env, --cwd and --idle-timeout-ms are for a command, not an address")
+		}
+		def = wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: args[1]}}
+		if len(header) > 0 {
+			def.Set("headers", header)
+		}
+		if *bearer != "" {
+			def.Set("bearerTokenEnv", *bearer)
+		}
+	case len(args) == 1:
+		return 2, wrong("add", "add needs the server's address, or its command after --")
+	default:
+		return 2, wrong("add", "add takes one address; \"%s\" is one too many. A command goes after --", args[2])
+	}
+	if len(policy) > 0 {
+		def.Set("policy", policy)
+	}
+	verb := "added"
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	if relay, ok := backend.(*remote.Client); ok {
+		if _, err = relay.Edit(s.ctx, name, def); err != nil {
 			return 1, err
 		}
-		result, err := backend.Call(ctx, id, values, true)
-		if err != nil {
+	} else {
+		if had, _ := config.Load(s.engine.Path); had.Has(name) {
+			verb = "replaced"
+		}
+		if err = config.Add(s.engine.Path, name, def); err != nil {
 			return 1, err
 		}
-		if json {
-			print(out, result, true)
-			return 0, nil
+	}
+	print(s.out, fmt.Sprintf("%s %s (%s)", verb, name, kind), false)
+	s.hint("Run \"tap list\" to check that it connects.")
+	return 0, nil
+}
+
+// remove deletes a server and any sign-in saved for it.
+func (s *shell) remove(args []string) (int, error) {
+	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
+	local := fs.Bool("local", false, "")
+	args, err := parse("remove", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) != 1 || args[0] == "" {
+		return 2, wrong("remove", "remove takes the name of one server")
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	removed := false
+	if relay, ok := backend.(*remote.Client); ok {
+		removed, err = relay.Edit(s.ctx, args[0], nil)
+	} else {
+		if removed, err = config.Remove(s.engine.Path, args[0]); err == nil && removed {
+			_, err = auth.Remove(s.engine.Path, args[0])
 		}
+	}
+	if err != nil {
+		return 1, err
+	}
+	if !removed {
+		return 1, fmt.Errorf("there is no server named \"%s\". Run \"tap list\" to see the ones there are", args[0])
+	}
+	print(s.out, "removed "+args[0], false)
+	return 0, nil
+}
+
+var layers = regexp.MustCompile(`^(?:(?:calling|sending) "[^"]*": )+`)
+
+// reason rewrites why a server is unavailable for a person: what went wrong, without the
+// layers it passed through, and what to try where tap knows.
+func reason(text string) string {
+	text = layers.ReplaceAllString(text, "")
+	switch {
+	case strings.HasPrefix(text, "spawn ") && strings.HasSuffix(text, " ENOENT"):
+		return "its command was not found: " + strings.TrimSuffix(strings.TrimPrefix(text, "spawn "), " ENOENT")
+	case strings.HasPrefix(text, "spawn ") && strings.HasSuffix(text, " EACCES"):
+		return "its command is not executable: " + strings.TrimSuffix(strings.TrimPrefix(text, "spawn "), " EACCES")
+	case text == "fetch failed":
+		return "its address could not be reached"
+	case text == "Connection closed":
+		return "it closed the connection before answering"
+	case strings.HasPrefix(text, "server deadline exceeded"):
+		return "it did not answer in time " + strings.TrimPrefix(text, "server deadline exceeded ")
+	case text == "Method Not Allowed", text == "Not Found", text == "Bad Request", text == "Forbidden":
+		return "its address did not answer as an MCP server (" + text + ")"
+	case text == "Unauthorized":
+		return "it refused the credential it was sent"
+	}
+	return text
+}
+
+// tools counts tools in words.
+func tools(count any) string {
+	if wire.String(count) == "1" {
+		return "1 tool"
+	}
+	return wire.String(count) + " tools"
+}
+
+// rows prints each server with its tool count, or why it is unavailable.
+func (s *shell) rows(result wire.Object, backend server.Backend) {
+	rows := result.Get("integrations").([]any)
+	if len(rows) == 0 {
+		where := s.engine.Path
+		if _, relayed := backend.(*remote.Client); relayed {
+			where = "the remote"
+		}
+		print(s.out, "No servers yet in "+where+".", false)
+		s.hint("Run \"tap import\" to bring over the ones your agents have, or \"tap add --help\" to add one.")
+		return
+	}
+	width := 0
+	for _, v := range rows {
+		width = max(width, len(wire.String(v.(wire.Object).Get("server"))))
+	}
+	for _, v := range rows {
+		row := v.(wire.Object)
+		summary := tools(row.Get("tools"))
+		switch {
+		case row.Has("error"):
+			summary = "unavailable: " + reason(wire.String(row.Get("error")))
+			if wire.String(row.Get("tools")) != "0" {
+				summary += " (" + tools(row.Get("tools")) + " when last reached)"
+			}
+		case row.Get("source") == "cache":
+			summary += " (as last listed; not checked now)"
+		}
+		fmt.Fprintf(s.out, "%-*s  %s\n", width, wire.String(row.Get("server")), summary)
+	}
+}
+
+// list shows every server with its tool count, or why it is unavailable. It asks the servers,
+// so what it prints is how things are now; --cached prints what tap last saw without asking.
+func (s *shell) list(args []string) (int, error) {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	json := fs.Bool("json", false, "")
+	local := fs.Bool("local", false, "")
+	cached := fs.Bool("cached", false, "")
+	args, err := parse("list", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) > 0 {
+		return 2, wrong("list", "list takes no arguments; \"tap search %s\" looks for tools", strings.Join(args, " "))
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	var result wire.Object
+	err = s.during("Asking the servers for their tools…", func() error {
+		if *cached {
+			result, err = backend.Listing(s.ctx, true)
+		} else {
+			result, err = backend.Refresh(s.ctx, "", true)
+		}
+		return err
+	})
+	if err != nil {
+		return 1, err
+	}
+	if *json {
+		print(s.out, result, true)
+		return 0, nil
+	}
+	s.rows(result, backend)
+	return 0, nil
+}
+
+// refresh asks one server, or all of them, for its tools again and prints what it found.
+func (s *shell) refresh(args []string) (int, error) {
+	fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
+	json := fs.Bool("json", false, "")
+	local := fs.Bool("local", false, "")
+	args, err := parse("refresh", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) > 1 {
+		return 2, wrong("refresh", "refresh takes the name of one server, or none for all of them")
+	}
+	name := ""
+	if len(args) == 1 {
+		name = args[0]
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	var result wire.Object
+	if err = s.during("Asking the servers for their tools…", func() error { result, err = backend.Refresh(s.ctx, name, true); return err }); err != nil {
+		return 1, err
+	}
+	if *json {
+		print(s.out, result, true)
+		return 0, nil
+	}
+	s.rows(result, backend)
+	return 0, nil
+}
+
+// inspect prints one tool's whole contract: its description and its schemas.
+func (s *shell) inspect(args []string) (int, error) {
+	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
+	local := fs.Bool("local", false, "")
+	fs.Bool("json", true, "")
+	args, err := parse("inspect", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) != 1 {
+		return 2, wrong("inspect", "inspect takes the id of one tool, as \"tap search\" prints it")
+	}
+	if dot := strings.Index(args[0], "."); dot < 1 || dot == len(args[0])-1 {
+		return 2, wrong("inspect", "\"%s\" is not a tool id. An id is server.tool, as \"tap search\" prints it", args[0])
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	var result wire.Object
+	err = s.during("Asking the server for the tool…", func() error {
+		result, err = backend.Discover(s.ctx, registry.SearchOptions{IDs: args, Detail: "full", Limit: 25, MaxBytes: 16777216}, true)
+		return err
+	})
+	if err != nil {
+		return 1, err
+	}
+	print(s.out, result, true)
+	return 0, nil
+}
+
+// search prints the tools that match a query, as an agent would find them, or every tool of
+// one server when only --server is given. It answers from the tool lists tap has saved, as an
+// agent's tap does; --refresh asks the servers first.
+func (s *shell) search(args []string) (int, error) {
+	fs := flag.NewFlagSet("search", flag.ContinueOnError)
+	json := fs.Bool("json", false, "")
+	local := fs.Bool("local", false, "")
+	limit := fs.String("limit", "8", "")
+	only := fs.String("server", "", "")
+	detail := fs.String("detail", "full", "")
+	offset := fs.Int("offset", 0, "")
+	budget := fs.Int("max-bytes", 16777216, "")
+	refresh := fs.Bool("refresh", false, "")
+	args, err := parse("search", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	count, err := strconv.Atoi(*limit)
+	if err != nil || count < 1 {
+		return 2, wrong("search", "--limit takes a whole number of at least 1, and \"%s\" is not one", *limit)
+	}
+	if *detail != "auto" && *detail != "full" && *detail != "summary" {
+		return 2, wrong("search", "--detail takes auto, full or summary")
+	}
+	if *offset < 0 || *offset > 1000000 {
+		return 2, wrong("search", "--offset takes a number from 0 to 1000000")
+	}
+	if *budget < 1024 || *budget > 16777216 {
+		return 2, wrong("search", "--max-bytes takes a number from 1024 to 16777216")
+	}
+	query := strings.TrimSpace(strings.Join(append(args, s.plain...), " "))
+	if query == "" && *only == "" {
+		return 2, wrong("search", "search needs something to look for, or --server to list one server's tools")
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	var result wire.Object
+	err = s.during("Asking the servers for their tools…", func() error {
+		result, err = backend.Discover(s.ctx, registry.SearchOptions{Query: query, Server: *only, Detail: *detail, Limit: float64(count), Offset: *offset, MaxBytes: *budget, Refresh: *refresh}, true)
+		return err
+	})
+	if err != nil {
+		return 1, err
+	}
+	if *json {
+		print(s.out, result, true)
+		return 0, nil
+	}
+	matches := result.Get("matches").([]any)
+	lines := []string{}
+	saved := false
+	for _, v := range matches {
+		t := v.(wire.Object)
+		desc, _ := t.Get("description").(string)
+		saved = saved || t.Get("stale") == true
+		lines = append(lines, strings.TrimRight(wire.String(t.Get("id"))+"\n  "+desc, " \t\r\n"))
+	}
+	if len(lines) == 0 {
+		if query == "" {
+			lines = append(lines, *only+" lists no tools.")
+		} else {
+			lines = append(lines, fmt.Sprintf("No tool matches \"%s\". Try other words, or \"tap list\" for the servers.", query))
+		}
+	}
+	if result.Has("nextOffset") {
+		next := int(wire.Number(wire.String(result.Get("nextOffset"))))
+		total := int(wire.Number(wire.String(result.Get("total"))))
+		lines = append(lines, fmt.Sprintf("(%d more; continue with --offset %d)", total-next, next))
+	}
+	for _, v := range result.Get("unavailable").([]any) {
+		row := v.(wire.Object)
+		lines = append(lines, wire.String(row.Get("server"))+" is unavailable: "+reason(wire.String(row.Get("error"))))
+	}
+	print(s.out, strings.Join(lines, "\n"), false)
+	if saved {
+		s.hint("These are from the tool lists tap saved. Add --refresh to ask the servers first.")
+	}
+	return 0, nil
+}
+
+// call runs one tool and prints what it returns. A tool that reports an error exits 1.
+func (s *shell) call(args []string) (int, error) {
+	fs := flag.NewFlagSet("call", flag.ContinueOnError)
+	json := fs.Bool("json", false, "")
+	local := fs.Bool("local", false, "")
+	raw := fs.String("args", "", "")
+	args, err := parse("call", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	args = append(args, s.plain...)
+	if len(args) == 0 || args[0] == "" {
+		return 2, wrong("call", "call needs the id of a tool, as \"tap search\" prints it")
+	}
+	id := args[0]
+	if dot := strings.Index(id, "."); dot < 1 || dot == len(id)-1 {
+		return 2, wrong("call", "\"%s\" is not a tool id. An id is server.tool, as \"tap search\" prints it", id)
+	}
+	if *raw == "-" {
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return 1, fmt.Errorf("cannot read the arguments from standard input")
+		}
+		*raw = string(b)
+	}
+	values, err := toolArgs(*raw, args[1:])
+	if err != nil {
+		return 2, err
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	var result wire.Object
+	if err = s.during("Calling "+id+"…", func() error { result, err = backend.Call(s.ctx, id, values, true); return err }); err != nil {
+		return 1, err
+	}
+	failed := result.Get("isError") == true
+	if *json {
+		print(s.out, result, true)
+	} else {
 		lines := []string{}
 		if content, ok := result.Get("content").([]any); ok {
 			for _, v := range content {
@@ -504,129 +769,365 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			b, _ := wire.JSON(result, true)
 			text = string(b)
 		}
-		print(out, text, false)
-		if result.Get("isError") == true {
-			fmt.Fprintln(errout, "tap: "+id+" reported an error")
-		}
-		return 0, nil
-	default:
-		print(out, fmt.Sprintf(usage, e.Version), false)
+		print(s.out, text, false)
+	}
+	if failed {
+		fmt.Fprintln(s.errOut, "tap: "+id+" reported an error")
 		return 1, nil
 	}
+	return 0, nil
 }
 
-// toolArgs combines JSON input with string key=value overrides, in argument order.
-func toolArgs(args []string) (any, error) {
-	raw, _ := take(&args, "--args")
-	var values any
+// toolArgs combines JSON arguments with KEY=VALUE strings, which replace the same keys.
+// Numbers in the JSON keep their spelling.
+func toolArgs(raw string, pairs []string) (any, error) {
+	var values any = wire.Object{}
 	if raw != "" {
 		v, err := wire.DecodeExact([]byte(raw))
 		if err != nil {
-			return nil, fmt.Errorf("%s", config.JSONError([]byte(raw), err))
+			return nil, wrong("call", "--args is not valid JSON: %s", config.JSONError([]byte(raw), err))
 		}
 		values = v
 	}
-	for _, pair := range args {
+	for _, pair := range pairs {
 		eq := strings.Index(pair, "=")
 		if eq < 1 {
-			return nil, fmt.Errorf("expected key=value, got \"%s\"", pair)
-		}
-		if values == nil {
-			values = wire.Object{}
+			return nil, wrong("call", "an argument is KEY=VALUE, and \"%s\" is not that", pair)
 		}
 		o, ok := values.(wire.Object)
 		if !ok {
-			return nil, fmt.Errorf("Cannot create property '%s' on %s '%v'", pair[:eq], typeName(values), values)
+			return nil, wrong("call", "--args must be a JSON object for %s to be added to it", pair)
 		}
 		o.Set(pair[:eq], pair[eq+1:])
 		values = o
 	}
-	if values == nil {
-		values = wire.Object{}
-	}
 	return values, nil
 }
 
-// typeName labels primitive JSON values for JavaScript assignment errors.
-func typeName(v any) string {
-	switch v.(type) {
-	case string:
-		return "string"
-	case bool:
-		return "boolean"
-	default:
-		return "number"
+// imports adds the servers that coding agents already have. It reads the agents' files and
+// changes only tap's.
+func (s *shell) imports(args []string) (int, error) {
+	fs := flag.NewFlagSet("import", flag.ContinueOnError)
+	var dry, force bool
+	fs.BoolVar(&dry, "dry-run", false, "")
+	fs.BoolVar(&dry, "n", false, "")
+	fs.BoolVar(&force, "force", false, "")
+	fs.BoolVar(&force, "f", false, "")
+	json := fs.Bool("json", false, "")
+	local := fs.Bool("local", false, "")
+	args, err := parse("import", fs, args)
+	if err != nil {
+		return 2, err
 	}
-}
-
-// remoteCommand configures the relay or hosts one shared connector registry.
-func remoteCommand(ctx context.Context, args []string, path, version string, out io.Writer) (int, error) {
+	if remoteCfg, err := config.LoadRemote(s.engine.Path); err != nil {
+		return 1, err
+	} else if remoteCfg != nil && !*local {
+		return 1, fmt.Errorf("a remote is selected, and this machine's commands and paths would not work there. Run \"tap import --local\" to add them to this machine's servers")
+	}
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+	known := agents.Places(home, cwd)
+	places := []agents.Place{}
 	if len(args) == 0 {
-		return 1, fmt.Errorf("usage: tap remote serve|use|off|status")
-	}
-	for i, arg := range args {
-		switch arg {
-		case "--addr", "--tls-cert", "--tls-key", "--token-env":
-			if i+1 == len(args) || strings.HasPrefix(args[i+1], "--") {
-				return 1, fmt.Errorf("%s needs a value", arg)
+		for _, place := range known {
+			if _, err := os.Stat(place.Path); err == nil {
+				places = append(places, place)
 			}
 		}
+		if len(places) == 0 {
+			looked := []string{}
+			for _, place := range known {
+				looked = append(looked, "  "+place.Path)
+			}
+			return 1, fmt.Errorf("no agent's config was found. tap looked for:\n%s\nPass the path of a config file to read another", strings.Join(looked, "\n"))
+		}
 	}
-	command := args[0]
-	args = args[1:]
+	for _, source := range args {
+		found := false
+		for _, place := range known {
+			if place.ID == source {
+				if _, err := os.Stat(place.Path); err == nil {
+					places, found = append(places, place), true
+				}
+			}
+		}
+		if found {
+			continue
+		}
+		if _, err := os.Stat(source); err == nil {
+			places = append(places, agents.Place{ID: "file", Agent: filepath.Base(source), Path: source})
+			continue
+		}
+		ids := []string{"claude", "codex", "opencode", "cursor", "vscode"}
+		for _, id := range ids {
+			if id == source {
+				return 1, fmt.Errorf("no config for %s was found on this machine", source)
+			}
+		}
+		if meant := nearest(source, ids); meant != "" {
+			return 2, wrong("import", "\"%s\" is not an agent tap knows or a file. Did you mean %s?", source, meant)
+		}
+		return 2, wrong("import", "\"%s\" is not an agent tap knows or a file. The agents are %s", source, strings.Join(ids, ", "))
+	}
+	existing, err := config.Load(s.engine.Path)
+	if err != nil {
+		return 1, err
+	}
+	report := []any{}
+	added, literal := 0, false
+	for _, place := range places {
+		found, err := agents.Read(place, cwd)
+		if err != nil {
+			return 1, err
+		}
+		if len(found.Servers)+len(found.Skipped) == 0 {
+			continue
+		}
+		lines := []string{}
+		entry := wire.Object{{Name: "agent", Value: found.Agent}, {Name: "path", Value: found.Path}}
+		servers, skipped := []any{}, []any{}
+		for _, server := range found.Servers {
+			same := false
+			if had, ok := existing.Get(server.Name).(wire.Object); ok {
+				a, _ := wire.JSON(had, false)
+				b, _ := wire.JSON(server.Def, false)
+				same = string(a) == string(b)
+			}
+			kind := wire.String(server.Def.Get("type"))
+			switch {
+			case same:
+				lines = append(lines, "  has "+server.Name+" already")
+				skipped = append(skipped, wire.Object{{Name: "name", Value: server.Name}, {Name: "why", Value: "tap has it already"}})
+				continue
+			case existing.Has(server.Name) && !force:
+				lines = append(lines, "  skipped "+server.Name+": tap has another server by that name; --force replaces it")
+				skipped = append(skipped, wire.Object{{Name: "name", Value: server.Name}, {Name: "why", Value: "tap has another server by that name"}})
+				continue
+			}
+			if !dry {
+				if err = config.Add(s.engine.Path, server.Name, server.Def); err != nil {
+					return 1, err
+				}
+			}
+			line := map[bool]string{true: "  would add ", false: "  added "}[dry] + server.Name + " (" + kind + ")"
+			if server.Note != "" {
+				line += ", " + server.Note
+			}
+			lines = append(lines, line)
+			existing.Set(server.Name, server.Def)
+			servers = append(servers, wire.Object{{Name: "name", Value: server.Name}, {Name: "definition", Value: server.Def}})
+			added++
+			for _, key := range []string{"env", "headers"} {
+				values, _ := server.Def.Get(key).(wire.Object)
+				for _, f := range values {
+					if v := wire.String(f.Value); v != "" && !strings.Contains(v, "${") {
+						literal = true
+					}
+				}
+			}
+		}
+		for _, skip := range found.Skipped {
+			lines = append(lines, "  skipped "+skip.Name+": "+skip.Why)
+			skipped = append(skipped, wire.Object{{Name: "name", Value: skip.Name}, {Name: "why", Value: skip.Why}})
+		}
+		entry.Set("servers", servers)
+		entry.Set("skipped", skipped)
+		report = append(report, entry)
+		if !*json {
+			print(s.out, "From "+found.Agent+" ("+found.Path+")\n"+strings.Join(lines, "\n"), false)
+		}
+	}
+	if *json {
+		print(s.out, wire.Object{{Name: "dryRun", Value: dry}, {Name: "sources", Value: report}}, true)
+		return 0, nil
+	}
+	switch {
+	case len(report) == 0:
+		print(s.out, "No servers were found in the configs tap read.", false)
+	case dry:
+		s.hint("Nothing was changed. Run \"tap import\" to add them.")
+	case added > 0:
+		if literal {
+			s.hint("Some values were copied as written, secrets included. To keep one out of tap's config, put it in an environment variable and write ${NAME} in its place.")
+		}
+		s.hint("Run \"tap list\" to check that they connect. Then take them out of each agent's config and leave tap there: your agent loads two tools from then on.")
+	}
+	return 0, nil
+}
+
+// browser opens a page in the person's browser.
+func browser(page string) error {
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	path, err := exec.LookPath(opener)
+	if err != nil {
+		return err
+	}
+	return exec.Command(path, page).Start()
+}
+
+// auth signs in to a server that uses OAuth, or forgets its sign-in.
+func (s *shell) auth(args []string) (int, error) {
+	fs := flag.NewFlagSet("auth", flag.ContinueOnError)
+	client := fs.String("client-id", "", "")
+	secretFile := fs.String("client-secret-file", "", "")
+	var port int
+	fs.IntVar(&port, "port", 0, "")
+	fs.IntVar(&port, "p", 0, "")
+	quiet := fs.Bool("no-browser", false, "")
+	forget := fs.Bool("remove", false, "")
+	local := fs.Bool("local", false, "")
+	args, err := parse("auth", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) != 1 || args[0] == "" {
+		return 2, wrong("auth", "auth takes the name of one server")
+	}
+	name := args[0]
+	if port < 0 || port > 65535 {
+		return 2, wrong("auth", "--port takes a port from 1 to 65535")
+	}
+	if remoteCfg, err := config.LoadRemote(s.engine.Path); err != nil {
+		return 1, err
+	} else if remoteCfg != nil && !*local {
+		return 1, fmt.Errorf("a remote is selected, and a sign-in is kept on the machine that runs the server. Run \"tap auth %s\" there, or pass --local for this machine's servers", name)
+	}
+	servers, err := config.Load(s.engine.Path)
+	if err != nil {
+		return 1, err
+	}
+	def, ok := servers.Get(name).(wire.Object)
+	if !ok {
+		return 1, fmt.Errorf("there is no server named \"%s\". Run \"tap list\" to see the ones there are", name)
+	}
+	endpoint, _ := def.Get("url").(string)
+	if endpoint == "" {
+		return 1, fmt.Errorf("%s runs a command, and only a server with an address signs in this way", name)
+	}
+	if *forget {
+		removed, err := auth.Remove(s.engine.Path, name)
+		if err != nil {
+			return 1, err
+		}
+		print(s.out, map[bool]string{true: "signed out of " + name, false: name + " had no sign-in"}[removed], false)
+		return 0, nil
+	}
+	secret := ""
+	if *secretFile != "" {
+		var b []byte
+		if *secretFile == "-" {
+			b, err = io.ReadAll(os.Stdin)
+		} else {
+			b, err = os.ReadFile(*secretFile)
+		}
+		if err != nil {
+			return 1, fmt.Errorf("cannot read the client secret from %s", *secretFile)
+		}
+		secret = strings.TrimSpace(string(b))
+	}
+	o := auth.Options{ConfigPath: s.engine.Path, Name: name, Endpoint: endpoint, Headers: map[string][]string{}, ClientID: *client, ClientSecret: secret,
+		Port: port, Say: s.errOut, Version: s.engine.Version}
+	if h, ok := def.Get("headers").(wire.Object); ok {
+		for _, f := range h {
+			o.Headers.Set(f.Name, config.Expand(f.Value))
+		}
+	}
+	if !*quiet {
+		o.Open = browser
+	}
+	if terminal(os.Stdin) && *secretFile != "-" {
+		o.Paste = os.Stdin
+	}
+	had := auth.Has(s.engine.Path, name, endpoint)
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
+	defer cancel()
+	result, err := auth.Authorize(ctx, o)
+	if err != nil {
+		return 1, err
+	}
+	switch {
+	case result.SignedIn:
+		print(s.out, fmt.Sprintf("signed in to %s (%s)", name, tools(result.Tools)), false)
+		s.hint("Agents that are already running find its tools on their next search.")
+	case had:
+		print(s.out, fmt.Sprintf("%s is signed in already (%s)", name, tools(result.Tools)), false)
+		s.hint("To sign in as someone else, run \"tap auth %s --remove\" first.", name)
+	default:
+		print(s.out, fmt.Sprintf("%s did not ask for a sign-in (%s)", name, tools(result.Tools)), false)
+	}
+	return 0, nil
+}
+
+// remote selects a relay, or serves this machine's servers to others.
+func (s *shell) remote(args []string) (int, error) {
+	path, version := s.engine.Path, s.engine.Version
+	if len(args) == 0 {
+		return 2, wrong("remote", "remote needs one of serve, use, off or status")
+	}
+	command, args := args[0], args[1:]
+	fs := flag.NewFlagSet("remote", flag.ContinueOnError)
+	addr := fs.String("addr", "", "")
+	cert := fs.String("tls-cert", "", "")
+	key := fs.String("tls-key", "", "")
+	tokenEnv := fs.String("token-env", "TAP_REMOTE_TOKEN", "")
+	insecure := fs.Bool("allow-insecure", false, "")
+	args, err := parse("remote", fs, args)
+	if err != nil {
+		return 2, err
+	}
 	switch command {
 	case "serve":
-		addr, _ := take(&args, "--addr")
-		cert, _ := take(&args, "--tls-cert")
-		key, _ := take(&args, "--tls-key")
-		insecure := boolean(&args, "--allow-insecure")
 		if len(args) != 0 {
-			return 1, fmt.Errorf("invalid remote serve arguments")
+			return 2, wrong("remote", "remote serve takes only flags; \"%s\" is not one", args[0])
 		}
-		return 0, remote.Serve(ctx, path, version, remote.Options{Addr: addr, TLSCert: cert, TLSKey: key, AllowInsecure: insecure})
+		return 0, remote.Serve(s.ctx, path, version, remote.Options{Addr: *addr, TLSCert: *cert, TLSKey: *key, AllowInsecure: *insecure})
 	case "use":
-		tokenEnv, present := take(&args, "--token-env")
-		if !present {
-			tokenEnv = "TAP_REMOTE_TOKEN"
-		}
-		insecure := boolean(&args, "--allow-insecure")
 		if len(args) != 1 {
-			return 1, fmt.Errorf("usage: tap remote use URL [--token-env NAME] [--allow-insecure]")
+			return 2, wrong("remote", "remote use takes the remote's address")
 		}
-		endpoint, err := config.NormalizeURL(args[0], insecure)
+		endpoint, err := config.NormalizeURL(args[0], *insecure)
 		if err != nil {
 			return 1, err
 		}
-		err = config.SetRemote(path, &config.Remote{URL: endpoint, TokenEnv: tokenEnv, AllowInsecure: insecure})
-		if err != nil {
+		if err = config.SetRemote(path, &config.Remote{URL: endpoint, TokenEnv: *tokenEnv, AllowInsecure: *insecure}); err != nil {
 			return 1, err
 		}
-		print(out, "remote configured: "+endpoint, false)
+		print(s.out, "remote configured: "+endpoint, false)
+		if os.Getenv(*tokenEnv) == "" {
+			s.hint("%s is not set here. Set it to the remote's token before using tap.", *tokenEnv)
+		} else {
+			s.hint("Run \"tap list\" to see the remote's servers.")
+		}
 		return 0, nil
 	case "off":
 		if len(args) != 0 {
-			return 1, fmt.Errorf("usage: tap remote off")
+			return 2, wrong("remote", "remote off takes no arguments")
 		}
 		if err := config.SetRemote(path, nil); err != nil {
 			return 1, err
 		}
-		print(out, "remote off", false)
+		print(s.out, "remote off", false)
 		return 0, nil
 	case "status":
 		if len(args) != 0 {
-			return 1, fmt.Errorf("usage: tap remote status")
+			return 2, wrong("remote", "remote status takes no arguments")
 		}
 		cfg, err := config.LoadRemote(path)
 		if err != nil {
 			return 1, err
 		}
 		if cfg == nil {
-			print(out, "remote off", false)
+			print(s.out, "remote off", false)
 		} else {
-			print(out, "remote: "+cfg.URL+" (token env: "+cfg.TokenEnv+")", false)
+			print(s.out, "remote: "+cfg.URL+" (token env: "+cfg.TokenEnv+")", false)
 		}
 		return 0, nil
-	default:
-		return 1, fmt.Errorf("usage: tap remote serve|use|off|status")
 	}
+	if meant := nearest(command, []string{"serve", "use", "off", "status"}); meant != "" {
+		return 2, wrong("remote", "remote has no \"%s\". Did you mean \"%s\"?", command, meant)
+	}
+	return 2, wrong("remote", "remote has no \"%s\"; it has serve, use, off and status", command)
 }

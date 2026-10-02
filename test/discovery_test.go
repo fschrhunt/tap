@@ -77,7 +77,7 @@ func TestMetadataPersistence(t *testing.T) {
 	equal(t, cat["source"], "cache")
 	equal(t, cat["availability"], "not_checked")
 	equal(t, r["matches"].([]any)[0].(map[string]any)["id"], "fixture.echo")
-	live := decode(t, output(t, b.run("refresh", "fixture"))).(map[string]any)
+	live := decode(t, output(t, b.run("refresh", "fixture", "--json"))).(map[string]any)
 	equal(t, live["integrations"].([]any)[0].(map[string]any)["availability"], "reachable")
 }
 

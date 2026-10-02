@@ -200,6 +200,11 @@ func startRoot(t *testing.T, root map[string]any) *harness {
 	h := &harness{t: t, config: b.config, replies: make(chan map[string]any, 32), done: make(chan error, 1)}
 	h.cmd = exec.Command(tapBin)
 	h.cmd.Env = append(os.Environ(), "TAP_CONFIG="+h.config, "TAP_DEADLINE_MS=500", "TAP_CACHE_DIR="+filepath.Join(filepath.Dir(h.config), "cache"))
+	// Result references are off unless asked for; the harness asks, since most of what it
+	// starts tests them. TestLeanSurface sets its own value.
+	if os.Getenv("TAP_REFERENCES") == "" {
+		h.cmd.Env = append(h.cmd.Env, "TAP_REFERENCES=on")
+	}
 	h.cmd.Stderr = &h.stderr
 	var err error
 	h.stdin, err = h.cmd.StdinPipe()

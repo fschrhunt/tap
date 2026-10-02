@@ -1,28 +1,51 @@
-tap dev — Less noise. Better agents.
+tap dev: one MCP server that stands in for all of yours.
 
-  tap                      run the MCP server over stdio (what a harness spawns)
-  tap list                 list configured integrations and their tool counts
-  tap add <name> <url>     add a streamable-HTTP server
-  tap add <name> -- <cmd>  add a stdio server (everything after -- is the command)
-  tap remove <name>        remove a server
-  tap search <query>       find tools, with the schemas needed to call them
-  tap inspect <server.tool> inspect a complete tool contract
-  tap refresh [server]     refresh cached metadata and check availability
-  tap call <server.tool> [k=v ...] [--args '<json>']
-  tap remote serve [--addr 127.0.0.1:7777] [--tls-cert FILE --tls-key FILE]
-  tap remote use URL [--token-env NAME] [--allow-insecure]
-  tap remote off           return to local connectors
-  tap remote status        print the relay endpoint
-  tap path                 print the config file tap reads
-  tap version              print the version
+Usage
+  tap                                  serve MCP over stdio; this is what an agent starts
+  tap COMMAND [ARGUMENT...] [FLAG...]  everything else
 
-Add flags: --env K=V, --header K=V, --cwd DIR, --bearer-token-env NAME
-           --allow-tool GLOB, --deny-tool GLOB, --reference-to SERVER,
-           --idle-timeout-ms N (stdio idle override; backend state is lost)
-           (--env, --header and policy flags may repeat)
-Other flags: --json prints raw output; --limit N caps search results.
-Search flags: --server NAME, --detail auto|full|summary, --offset N,
-              --max-bytes N, --refresh. Default CLI detail: full.
-             --local uses local connectors for add/remove/list/search/call/inspect/refresh.
-Remote serve requires TAP_REMOTE_TOKEN; TAP_REMOTE_ADMIN_TOKEN overrides admin auth.
-Nonloopback HTTP requires --allow-insecure on both serve and use.
+Examples
+  tap import
+  tap add docs https://docs.example.com/mcp
+  tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes
+  tap list
+  tap search create issue
+  tap call files.read_text_file path=~/notes/todo.md
+
+Servers
+  import   bring over the servers your agents already have
+  add      add a server
+  remove   remove a server
+  list     show the servers and how many tools each has
+  refresh  ask one server for its tools again
+  auth     sign in to a server
+
+Tools
+  search   find tools, the way your agent does
+  inspect  print one tool's whole contract
+  call     call a tool
+
+More than one machine
+  remote  share one set of servers between machines
+
+Other
+  path     print the config file tap reads
+  version  print the version
+  help     show help for tap or one command
+
+Flags
+  -h, --help     show help for tap or for a command
+      --version  print the version
+      --json     print JSON instead of text (import, list, refresh, search, call)
+      --local    use this machine's servers while a remote is selected
+
+Environment
+  TAP_CONFIG        the config file (default ~/.tap/servers.json)
+  TAP_DEADLINE_MS   how long a server may take to connect and list its tools (default 5000)
+  TAP_REFERENCES    set to on to let an agent keep large results as references
+  TAP_REMOTE_TOKEN  the token a remote and its clients share
+  NO_COLOR          set to print help without bold headings
+
+Run "tap COMMAND --help" for a command's examples and flags.
+Docs:   https://github.com/fschrhunt/tap/tree/main/docs
+Issues: https://github.com/fschrhunt/tap/issues

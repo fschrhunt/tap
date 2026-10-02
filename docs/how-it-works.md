@@ -20,8 +20,12 @@ mentioning exactly one configured provider also scopes discovery there; ambiguou
 Ranking uses field-weighted BM25 over identifiers, providers, titles, descriptions and parameter
 names/descriptions/enum labels. Unicode tokenization, camelCase splitting, conservative English
 plural normalization, query filler removal and unique one-edit typo recovery reduce missed matches.
-An immutable index is reused until catalogs change. Scores are not probabilities. Lexical retrieval
-cannot reliably infer semantic-only requests such as “notify the team”; browse or refine instead.
+A query that is a tool's name or id, word for word, returns the tools so named. Otherwise the
+tools holding every word of the query are returned, and when none does, the tools holding any.
+No index is built: each query reads the catalogs it is given, which takes under a millisecond for
+hundreds of tools and leaves nothing to prepare before the first search. Scores are not
+probabilities. Lexical retrieval cannot reliably infer semantic-only requests such as “notify the
+team”; browse or refine instead.
 
 `detail` defaults to `auto`: include complete schemas when they fit `maxBytes` (default 32768),
 otherwise return labeled summaries with `schemaLoaded: false`. Inspect those ids with `detail: full`
@@ -35,7 +39,9 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
 
 ## Connections and metadata
 
-- **Lazy startup:** initialization and tools/list open no downstream connections. Scoped discovery
+- **Lazy startup:** initialization and tools/list open no downstream connections. While it
+  answers them, a serving tap reads its saved index, so the first search does not wait for it;
+  that starts no server. Scoped discovery
   contacts no unrelated providers. Unscoped cold discovery contacts all selected providers, with
   at most eight simultaneous connection/discovery operations. Calls open only their target.
 - **Budgets/backoff:** connection and paginated listing share a per-server deadline. Failed servers
@@ -50,11 +56,16 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
   indexes. Stale matches remain labeled even when a refresh has failed.
 - **Pagination:** tools/list follows at most 100 pages / 16 MiB; repeated cursors and duplicate or
   empty tool names are refused. Tool-change notifications invalidate memory and queue index updates.
+- **Unchanged lists:** each catalog carries a SHA-256 digest of what its server answered. A
+  refresh that gets the same answer keeps the tools already decoded and writes nothing.
 - **Config changes:** each operation snapshots definitions and fingerprints together. Changed or
   removed definitions retire their old sessions/catalogs; removed servers cannot still be called.
+  tap reads the config again whenever the file's size or modification time has changed, or it
+  was modified in the last two seconds.
 - **Persistence:** the private index is `<config path>.tools.json` (mode 0600), using symlink-safe
-  atomic replacement and coalesced writes outside discovery. Corrupt, public, oversized or
-  definition-mismatched indexes are ignored. Removing it clears saved metadata, not connectors.
+  atomic replacement and coalesced writes outside discovery. It is JSON with one line per tool,
+  which lets tap find and decode the tools side by side. Corrupt, public, oversized,
+  definition-mismatched or differently laid out indexes are ignored. Removing it clears saved metadata, not connectors.
   `TAP_CACHE_DIR=off` disables persistence. Unwritable index directories do not prevent tool use.
   Fingerprints hash expanded connection inputs/credentials; stdio also includes working directory
   and inherited environment. Connection definitions and credentials are not stored in the index.
@@ -70,9 +81,10 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
 | `TAP_DEADLINE_MS` | `5000` | Per-server connect/list budget; not tool execution |
 | `TAP_FAIL_TTL_MS` | `5000` | Discovery/connect retry backoff; `0` disables it |
 | `TAP_IDLE_TTL_MS` | `300000` | Close unused downstream sessions after five minutes |
+| `TAP_REFERENCES` | off | `on` offers [result references](#opt-in-result-references) to the agent |
 
 HTTP sessions remain unwrapped so SDK protocol headers and idle notifications work. Stdio retains
-raw capture. Application request/result metadata is forwarded; protocol identity and progress
+raw capture, and reads tool lists from it alone rather than decoding them twice. Application request/result metadata is forwarded; protocol identity and progress
 tokens belong to each hop and are never blindly copied between hops.
 
 ## Validate and call
@@ -99,6 +111,11 @@ the SDK. Invalid explicit-null structured content is dropped. Backend tool-repor
 preserved, not reclassified. Stdio preserves raw numeric spelling; HTTP retains SDK-supported fields.
 
 ## Opt-in result references
+
+References are off unless `TAP_REFERENCES=on` is set where tap runs. Off, `plugin_call` offers
+only `tool` and `arguments`, which keeps the two definitions an agent loads near 300 tokens, and
+a call that uses a reference field is refused with `reference_unavailable` before anything is
+sent. On, `plugin_call` also describes the fields below.
 
 ```json
 {"tool":"db.query","arguments":{"sql":"SELECT * FROM orders"},"resultMode":"reference"}

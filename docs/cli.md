@@ -1,34 +1,105 @@
 # Command line
 
-`tap` with no arguments is the MCP server an agent runs. The other commands let you use the same
-engine from a shell, to set it up and to see what your agent sees.
+Started by an agent, `tap` with no arguments is the MCP server. The commands let you set tap up
+from a shell and see what your agent sees. Run in a terminal with no arguments, `tap` prints a
+short introduction instead of waiting for an agent that is not there.
 
 | Command | Does |
 | --- | --- |
 | `tap` | Serve MCP over stdio |
-| `tap list` | Configured servers and their tool counts |
-| `tap add NAME URL` | Add an HTTP server (see [Servers](servers.md)) |
-| `tap add NAME -- CMD [ARGS...]` | Add a stdio server |
-| `tap remove NAME` | Remove a server |
-| `tap search QUERY` | Find tools, with what is needed to call them |
-| `tap search --server NAME` | Browse one integration's tools |
-| `tap inspect SERVER.TOOL` | Inspect an exact tool's full contract |
-| `tap refresh [NAME]` | Refresh cached metadata and check live availability |
-| `tap call SERVER.TOOL [K=V ...] [--args JSON]` | Call a tool |
-| `tap path` | Print the config file tap reads |
-| `tap version` | Print the version |
+| `tap import [SOURCE...]` | Add the servers your agents already have (see [Servers](servers.md)) |
+| `tap add NAME URL` | Add an HTTP server |
+| `tap add NAME -- COMMAND [ARGUMENT...]` | Add a stdio server |
+| `tap remove NAME` | Remove a server and its saved sign-in |
+| `tap list` | The servers and how many tools each has |
+| `tap refresh [NAME]` | Ask one server, or all of them, for its tools again |
+| `tap auth NAME` | Sign in to a server |
+| `tap search QUERY...` | Find tools, with what is needed to call them |
+| `tap inspect SERVER.TOOL` | Print one tool's whole contract |
+| `tap call SERVER.TOOL [KEY=VALUE]... [--args JSON]` | Call a tool |
 | `tap remote serve` | Host the registry over authenticated HTTP or HTTPS |
 | `tap remote use URL` | Select a remote for CLI commands and stdio relays |
 | `tap remote off` | Return to the saved local registry |
 | `tap remote status` | Print the selected relay endpoint |
+| `tap path` | Print the config file tap reads |
+| `tap version` | Print the version |
+| `tap help [COMMAND]` | Help for tap, or for one command |
 
-With a remote selected, `add`, `remove`, `list`, `search` and `call` use it.
-`--local` explicitly uses the saved local registry. See [Remote](remote.md) for
-listener, TLS and authentication options. `path` still prints the local config
-file that stores the remote selection.
+## Help
 
-`--json` prints raw output; `--limit N` caps search results (default 8). MCP search validates
-limits from 1 to 25. For compatibility, the CLI keeps the original unconstrained limit handling.
+`tap --help` lists every command, the flags they share and the environment tap reads.
+`tap COMMAND --help`, `tap COMMAND -h` and `tap help COMMAND` show one command's usage, examples
+and flags. `-h` and `--help` mean help wherever they stand, so adding one to a command you are
+unsure of never runs it.
+
+## Flags
+
+Flags may come before, between or after a command's arguments, as `--flag value` or
+`--flag=value`. A flag a command does not have is an error, with the nearest one it does have.
+Everything after `--` is taken as written: for `tap add`, it is the server's command.
+
+| Flag | Commands | Meaning |
+| --- | --- | --- |
+| `-h`, `--help` | all | Show help |
+| `--version` | `tap` | Print the version |
+| `--json` | `import`, `list`, `refresh`, `search`, `call` | Print JSON instead of text |
+| `--local` | `import`, `add`, `remove`, `list`, `refresh`, `search`, `inspect`, `call`, `auth` | Use this machine's servers while a remote is selected |
+| `--cached` | `list` | Print the tool lists tap has saved, without asking the servers |
+| `--server NAME` | `search` | Look only in this server; with no query, list its tools |
+| `--limit N` | `search` | How many tools to print: a whole number of at least 1 (default 8) |
+| `--offset N` | `search` | Skip this many matches, to continue a longer list |
+| `--refresh` | `search` | Ask the servers for their tools first |
+| `--detail auto\|full\|summary` | `search` | With `--json`: whole schemas, or summaries (default `full`) |
+| `--max-bytes N` | `search` | With `--json`: the most the answer may hold |
+| `--args JSON` | `call` | The arguments as a JSON object; `-` reads standard input |
+| `-n`, `--dry-run` | `import` | Show what would be added and add nothing |
+| `-f`, `--force` | `import` | Replace servers tap already has under the same name |
+
+With a remote selected, `add`, `remove`, `list`, `refresh`, `search`, `inspect` and `call` use it; `--local` uses the
+saved local registry. See [Remote](remote.md) for listener, TLS and authentication options.
+`path` still prints the local config file that stores the remote selection.
+
+## Output and exit codes
+
+What you asked for is printed on standard output; anything tap says about it, such as an error,
+a hint for what to run next, or a note that it is waiting on the servers, goes to standard
+error. Hints and waiting notes are only written to a terminal, so pipes and logs stay clean.
+Use `--json` in scripts: the text for people may change.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The command did what was asked |
+| `1` | It failed: a server could not be reached, a tool reported an error, a name does not exist |
+| `2` | It was called wrongly: an unknown command or flag, a missing or malformed argument. Nothing was changed |
+
+A command called wrongly prints the mistake, the command's usage and where its examples are:
+
+```text
+$ tap list --jsno
+tap: list has no flag --jsno. Did you mean --json?
+
+Usage: tap list [--json]
+Run "tap list --help" for examples.
+```
+
+## List
+
+`tap list` connects to every server and prints how many tools it has, or why it is unavailable:
+
+```text
+files   13 tools
+linear  unavailable: needs you to sign in: run "tap auth linear"
+docs    unavailable: its address could not be reached
+```
+
+`tap list --cached` prints the tool lists tap has saved, without starting or asking any server:
+
+```text
+files   13 tools (as last listed; not checked now)
+```
+
+`tap refresh NAME` asks one server for its tools again and saves what it answers; with no name,
+it asks them all.
 
 ## Search
 
@@ -41,9 +112,11 @@ files.echo
   Echo the supplied message.
 ```
 
-Search ranks word overlap across tool/provider names, titles, descriptions and parameter metadata;
-query filler no longer excludes otherwise relevant tools. `--json` shows the full input schema by
-default for shell commands:
+Words are matched against a tool's name, its server, its title and description, and its
+parameters. A query that is a tool's name or id finds that tool. Otherwise the tools that hold
+every word are printed, best first, and when none holds them all, the tools that hold any.
+`--server NAME` looks in one server only, and with no query lists that server's tools.
+`--json` shows the input schema too, as the agent gets it:
 
 ```sh
 tap search echo --json
@@ -62,32 +135,25 @@ tap search echo --json
         "properties": { "message": { "type": "string" } },
         "required": ["message"],
         "$schema": "https://json-schema.org/draft/2020-12/schema"
-      }
+      },
+      "schemaLoaded": true,
+      "stale": false
     }
   ],
   "unavailable": [],
-  "catalogs": [{"server":"files","source":"cache","availability":"not_checked","observedAt":"2026-10-02T00:00:00Z"}]
+  "catalogs": [
+    { "server": "files", "tools": 13, "source": "live", "observedAt": "2026-10-02T08:00:00Z", "availability": "reachable", "stale": false }
+  ]
 }
 ```
 
-The displayed JSON above is abbreviated: matches also include `schemaLoaded` and, for full
-contracts, optional output schemas and untrusted server guidance.
+`tap search`, like an agent's tap, answers at once from the tool lists tap has saved and
+refreshes them in the background; `stale: true` marks a match whose server has not answered
+since. `--refresh` waits for the servers first. `tap list` always asks them, so what it prints
+is how things are now. See [How it works](how-it-works.md).
 
-```sh
-tap search --server issues --detail summary --limit 5
-tap search --server issues --detail summary --offset 5 --limit 5
-tap search 'create issue' --server issues --detail auto --max-bytes 32768 --json
-tap inspect issues.create_issue
-tap refresh issues
-tap list --refresh
-```
-
-Search `--detail` is `full` by default on the CLI; MCP defaults to `auto`. Full schemas are never
-truncated to meet `--max-bytes` (1024–16777216). Auto can return labeled summaries; summary omits
-schemas. Follow `nextOffset` in JSON output for results withheld by count or byte budget.
-`--refresh` bypasses fresh metadata caches. Cached tool counts do not establish current availability.
-See [How it works](how-it-works.md) for reference operations, which are MCP-session-only and cannot
-be shared between separate CLI invocations.
+`tap inspect SERVER.TOOL` prints one tool's description and its input and output schemas as
+JSON, asking only the server that has it.
 
 ## Call
 
@@ -96,16 +162,14 @@ Give arguments as `key=value` strings, as JSON with `--args`, or both (`key=valu
 ```sh
 tap call files.echo message=hi
 tap call issues.create --args '{"title": "Login fails", "labels": ["bug"]}'
+tap call db.query --args - < query.json
 ```
 
-Without `--json`, a tool that reports an error prints its content and a diagnostic on stderr.
-`--json` prints the downstream result (HTTP uses the SDK's supported fields; stdio retains
-raw response fields). For compatibility, both forms exit 0 for a
-tool-reported error; command and protocol failures exit 1:
+The tool's text is printed; `--json` prints the downstream result (HTTP uses the SDK's supported
+fields; stdio retains raw response fields). When the tool reports an error, its content is still
+printed, and the command exits 1:
 
 ```text
-tap: /message: required field is missing
+Input validation error: Invalid arguments for tool echo: message: Invalid input: expected string, received undefined
+tap: files.echo reported an error
 ```
-
-The example is a gateway validation failure (exit 1): it never reaches the backend. Transport or
-protocol failure after sending a call may mean a write already happened. Tap never retries calls.

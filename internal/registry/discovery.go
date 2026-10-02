@@ -36,8 +36,14 @@ func (e *Engine) Overview() string {
 		names = append(names, s.Name)
 		size += len(s.Name)
 	}
+	if len(names) == 0 {
+		return ""
+	}
 	b, _ := wire.JSON(names, false)
-	return fmt.Sprintf(" Configured integration names (not live capabilities): %s. %d additional integrations can be listed with plugin_search.", b, len(servers)-len(names))
+	if more := len(servers) - len(names); more > 0 {
+		return fmt.Sprintf(" Servers: %s and %d more; plugin_search with no arguments lists them.", b, more)
+	}
+	return fmt.Sprintf(" Servers: %s.", b)
 }
 
 // Search keeps the shell's full-schema search and original numeric limit semantics.
@@ -135,12 +141,7 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 			row.Set("error", r.err)
 		}
 		catalogs = append(catalogs, row)
-		for _, t := range r.tools {
-			name, _ := t.Get("name").(string)
-			if name != "" && checkPolicy(def, name) == nil {
-				tools = append(tools, discovery.Tool{ID: r.name + "." + name, Server: r.name, Definition: t})
-			}
-		}
+		tools = append(tools, offeredTools(r.name, def, r.tools)...)
 	}
 	ranked := []discovery.Match{}
 	if len(opt.IDs) > 0 {
@@ -162,7 +163,7 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 			ranked = append(ranked, discovery.Match{Tool: t})
 		}
 	} else if opt.Query != "" {
-		ranked = e.rankTools(tools, rows, opt.Query)
+		ranked = discovery.Rank(tools, opt.Query)
 	}
 	n := len(ranked)
 	start := min(max(opt.Offset, 0), n)
@@ -215,6 +216,12 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 		matches = trial
 	}
 	out.Set("matches", matches)
+	for _, m := range matches {
+		if m.(wire.Object).Get("schemaLoaded") == false {
+			out.Set("note", "A match with schemaLoaded false has no input schema here. Look its id up with ids and detail full before calling it.")
+			break
+		}
+	}
 	if start+len(matches) < n {
 		out.Set("nextOffset", start+len(matches))
 	} else {
@@ -229,24 +236,21 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 	return out, nil
 }
 
-// rankTools reuses one immutable index until its scoped catalogs or policies change.
-func (e *Engine) rankTools(tools []discovery.Tool, rows []serverTools, query string) []discovery.Match {
-	var key strings.Builder
-	for _, r := range rows {
-		key.WriteString(r.catalog.fingerprint)
-		key.WriteByte(':')
-		key.WriteString(r.catalog.at.Format(time.RFC3339Nano))
-		key.WriteByte(';')
+// offeredTools lists the tools of one server that its policy lets a search show.
+func offeredTools(server string, def wire.Object, tools []wire.Object) []discovery.Tool {
+	out := make([]discovery.Tool, 0, len(tools))
+	for _, t := range tools {
+		name, _ := t.Get("name").(string)
+		if name != "" && checkPolicy(def, name) == nil {
+			out = append(out, discovery.Tool{ID: server + "." + name, Server: server, Definition: t})
+		}
 	}
-	e.rankMu.Lock()
-	if e.index == nil || e.indexKey != key.String() {
-		e.index = discovery.New(tools)
-		e.indexKey = key.String()
-	}
-	index := e.index
-	e.rankMu.Unlock()
-	return index.Search(query)
+	return out
 }
+
+// Warm reads the saved tool lists, so the first search does not wait for them. It starts
+// no server.
+func (e *Engine) Warm() { _, _ = e.snapshot() }
 
 // toolView never clips schemas; summaries explicitly identify missing call contracts.
 func toolView(t discovery.Tool, full bool) wire.Object {

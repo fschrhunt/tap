@@ -117,6 +117,7 @@ func TestExistingSessionAdoptsServers(t *testing.T) {
 
 // TestReferenceSessionIsolation forbids inspect/drop/copy by a different authenticated session.
 func TestReferenceSessionIsolation(t *testing.T) {
+	t.Setenv("TAP_REFERENCES", "on")
 	fixture := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "test"}, nil)
 	fixture.AddTool(&mcp.Tool{Name: "echo", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "private result"}}}, nil

@@ -16,7 +16,9 @@ or modify a personal server config for tests.
 ## Code map
 
 - `cmd/tap/main.go`: process entry point and the link-time version (`dev` by default).
-- `internal/cli/`: CLI dispatch and output.
+- `internal/cli/`: the command line: dispatch, flags, output, and the help texts in `help.go`.
+- `internal/agents/`: reads the MCP servers in coding agents' configs, for `tap import`.
+- `internal/auth/`: the sign-in for `tap auth`, its owner-only store, and token renewal.
 - `internal/config/`: config reads, atomic writes, and environment/home expansion.
 - `internal/registry/`: lazy downstream connections, deadlines, search, calls, and tool cache.
 - `internal/discovery/`: offline field-weighted capability ranking.

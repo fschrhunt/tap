@@ -163,6 +163,30 @@ func TestSurface(t *testing.T) {
 	}
 }
 
+// TestLeanSurface pins what an agent carries by default: two tools whose definitions stay
+// small, with the result-reference parameters absent and their use refused until turned on.
+func TestLeanSurface(t *testing.T) {
+	t.Setenv("TAP_REFERENCES", "off")
+	h := start(t, nil)
+	h.initialize()
+	tools := h.request("tools/list", nil)["tools"].([]any)
+	size := 0
+	for _, v := range tools {
+		tool := v.(map[string]any)
+		core, _ := json.Marshal(map[string]any{"name": tool["name"], "description": tool["description"], "input_schema": tool["inputSchema"]})
+		size += len(core)
+		if tool["name"] == "plugin_call" {
+			props := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			equal(t, len(props), 2)
+		}
+	}
+	if len(tools) != 2 || size > 1300 {
+		t.Fatalf("the default surface is %d tools and %d bytes; it must stay two tools under 1300 bytes", len(tools), size)
+	}
+	failureCode(t, invokeCall(h, map[string]any{"tool": "fixture.data", "resultMode": "reference"}), "reference_unavailable")
+	equal(t, h.call("echo", map[string]any{"message": "plain calls work"})["content"].([]any)[0].(map[string]any)["text"], "plain calls work")
+}
+
 // TestSearchLimit protects total-before-limit and the requested shortlist size.
 func TestSearchLimit(t *testing.T) {
 	h := start(t, nil)

@@ -7,6 +7,18 @@ Tap runs the commands named in `servers.json`, as you. A configured command havi
 your permissions is expected behavior, not a vulnerability. Trust the commands
 you configure.
 
+## Sign-ins
+
+`tap auth` saves the tokens a sign-in gives it, and the client tap registered as, in `servers.json.auth.json`
+beside the config, with mode `0600`. tap refuses to read the file when group or others can.
+Anyone who can read it can act as you on those servers until you sign out with
+`tap auth NAME --remove` or revoke tap with the provider. Tokens are sent only to the
+address the sign-in was given for, and never appear in the tool index or in tap's output.
+The sign-in page is opened on the authorization server that the MCP server itself names; check
+the address in your browser before you approve.
+
+## Policy, validation and caches
+
 All downstream tools route through `plugin_call`; original host per-tool permission rules may no
 longer match them. Explicit allow/deny policy is enforced by tap, independently of server safety
 annotations. Defaults remain unrestricted for compatibility. Tap is not a sandbox, and an agent
@@ -19,7 +31,10 @@ the operation's outcome unknown.
 
 Persistent metadata caches can contain sensitive schemas or server guidance; files are owner-only,
 and `TAP_CACHE_DIR=off` disables persistence. Configured credentials are used only in the cache-key
-digest, not written as cache metadata. Result references are bounded, memory-only and process-local.
+digest, not written as cache metadata. A call is checked against tools read from that cache only
+when the live server has just answered with the tool list whose digest was saved beside them, so
+whoever can write the cache can shape that check: it deserves the protection the config gets.
+Result references are off unless `TAP_REFERENCES=on`; they are bounded, memory-only and process-local.
 Cross-server reference copies require a source-side grant, but inline copying by the agent remains
 possible. Neither this policy nor references constitute a full data-loss prevention system.
 ## Remote deployments

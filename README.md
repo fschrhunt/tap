@@ -15,8 +15,9 @@ tap is one MCP server that stands in for all of yours. Your agent loads two tool
 when it needs them.
 
 Search or browse capabilities, inspect complete contracts, and call with validated arguments.
-Fresh metadata can be searched without starting backends, even across sessions. Large results can
-optionally stay behind session-local references rather than filling the agent's context.
+Fresh metadata can be searched without starting backends, even across sessions. With
+`TAP_REFERENCES=on`, large results can stay behind session-local references rather than filling
+the agent's context.
 
 ## Install
 
@@ -44,11 +45,15 @@ See [Install](docs/install.md) for details.
 ## Use
 
 ```sh
-tap add docs https://docs.example.com/mcp          # an HTTP server
+tap import                                         # bring over the servers your agents have
+tap add docs https://docs.example.com/mcp          # or add an HTTP server
 tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes
+tap auth linear                                    # sign in to a server
 tap list                                           # servers and tool counts
-tap search "create issue"                          # what your agent would find
+tap search create issue                            # what your agent would find
 ```
+
+`tap --help` lists every command, and `tap COMMAND --help` has examples for each.
 
 ## Docs
 
