@@ -76,7 +76,19 @@ install -m 755 tap ~/.local/bin/tap
 ## Connect your agent
 
 Register `tap` as the one MCP server your agent uses. Run with no arguments, it serves MCP over
-stdio.
+stdio. tap connects the coding agents it finds on this machine:
+
+```sh
+tap connect             # every agent tap finds
+tap connect claude      # one of them: claude, codex or opencode
+```
+
+It runs the agent's own command — `claude mcp add`, `codex mcp add`, `opencode mcp add` — and
+reports each agent as `connected`, or `has tap already` when its config has tap in it already.
+Only the agent's own command writes the agent's config. Start a new agent session after
+connecting, so it loads tap.
+
+To connect by hand, or to connect any other MCP client, add `tap` yourself:
 
 **Claude Code:**
 

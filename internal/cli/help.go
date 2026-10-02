@@ -23,6 +23,14 @@ type topic struct {
 
 // topics lists the commands in the order the full help shows them.
 var topics = []topic{
+	{name: "connect", group: "Servers", summary: "point your coding agents at tap", page: "install.md#connect-your-agent",
+		usage: []string{"tap connect [AGENT...]"},
+		about: "Runs each coding agent's own command to add tap as an MCP server, and reports what\n" +
+			"it found: connected, or has tap already. With no AGENT it connects every agent it\n" +
+			"finds on this machine; AGENT is claude, codex or opencode, or several of them. Only\n" +
+			"the agent's own command writes the agent's config; an agent that already has tap is\n" +
+			"left as it is.",
+		examples: []string{"tap connect                 # every agent on this machine", "tap connect claude", "tap connect codex opencode"}},
 	{name: "import", group: "Servers", summary: "bring over the servers your agents already have", page: "servers.md#bringing-over-an-agents-servers",
 		usage: []string{"tap import [SOURCE...] [--dry-run] [--force]"},
 		about: "Reads the MCP servers that coding agents keep in their own configs and adds them to tap.\n" +
@@ -162,6 +170,7 @@ func brief(w io.Writer, version string) {
 		"every tool from every server. Started by an agent, tap serves MCP. Here, it shows this.\n\n")
 	p.heading("Start here")
 	p.rows([][2]string{
+		{"tap connect", "point your coding agents at tap"},
 		{"tap import", "bring over the servers your agents already have"},
 		{"tap add docs https://docs.example.com/mcp", "or add one yourself"},
 		{"tap list", "check that they connect"},
@@ -179,7 +188,7 @@ func full(w io.Writer, version string) {
 	p.rows([][2]string{{"tap", "serve MCP over stdio; this is what an agent starts"}, {"tap COMMAND [ARGUMENT...] [FLAG...]", "everything else"}})
 	fmt.Fprintln(w)
 	p.heading("Examples")
-	for _, example := range []string{"tap import", "tap add docs https://docs.example.com/mcp", "tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes",
+	for _, example := range []string{"tap connect", "tap import", "tap add docs https://docs.example.com/mcp", "tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes",
 		"tap list", "tap search create issue", "tap call files.read_text_file path=~/notes/todo.md"} {
 		fmt.Fprintln(w, "  "+example)
 	}
