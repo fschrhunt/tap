@@ -14,6 +14,15 @@ engine from a shell, to set it up and to see what your agent sees.
 | `tap call SERVER.TOOL [K=V ...] [--args JSON]` | Call a tool |
 | `tap path` | Print the config file tap reads |
 | `tap version` | Print the version |
+| `tap remote serve` | Host the registry over authenticated HTTP or HTTPS |
+| `tap remote use URL` | Select a remote for CLI commands and stdio relays |
+| `tap remote off` | Return to the saved local registry |
+| `tap remote status` | Print the selected relay endpoint |
+
+With a remote selected, `add`, `remove`, `list`, `search` and `call` use it.
+`--local` explicitly uses the saved local registry. See [Remote](remote.md) for
+listener, TLS and authentication options. `path` still prints the local config
+file that stores the remote selection.
 
 `--json` prints raw output; `--limit N` caps search results (default 8). MCP search validates
 limits from 1 to 25. For compatibility, the CLI keeps the original unconstrained limit handling.
@@ -66,7 +75,8 @@ tap call issues.create --args '{"title": "Login fails", "labels": ["bug"]}'
 ```
 
 Without `--json`, a tool that reports an error prints its content and a diagnostic on stderr.
-`--json` prints the downstream result directly. For compatibility, both forms exit 0 for a
+`--json` prints the downstream result (HTTP uses the SDK's supported fields; stdio retains
+raw response fields). For compatibility, both forms exit 0 for a
 tool-reported error; command and protocol failures exit 1:
 
 ```text

@@ -49,7 +49,7 @@ tap search "create issue"                          # what your agent would find
 ## Docs
 
 [Install](docs/install.md) · [Servers](docs/servers.md) · [Command line](docs/cli.md) ·
-[How it works](docs/how-it-works.md)
+[How it works](docs/how-it-works.md) · [Remote](docs/remote.md)
 
 ## License
 

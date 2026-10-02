@@ -187,7 +187,7 @@ func TestLiteralUnicodeEscape(t *testing.T) {
 	equal(t, r["content"], []any{map[string]any{"type": "text", "text": `\u2028`}})
 }
 
-// TestHelp preserves every command and flag in the original help text.
+// TestHelp keeps the command and flag reference in sync with CLI help.
 func TestHelp(t *testing.T) {
 	data, err := os.ReadFile("testdata/help.txt")
 	if err != nil {

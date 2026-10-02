@@ -7,9 +7,16 @@ tap dev — Less noise. Better agents.
   tap remove <name>        remove a server
   tap search <query>       find tools, with the schemas needed to call them
   tap call <server.tool> [k=v ...] [--args '<json>']
+  tap remote serve [--addr 127.0.0.1:7777] [--tls-cert FILE --tls-key FILE]
+  tap remote use URL [--token-env NAME] [--allow-insecure]
+  tap remote off           return to local connectors
+  tap remote status        print the relay endpoint
   tap path                 print the config file tap reads
   tap version              print the version
 
 Add flags: --env K=V, --header K=V, --cwd DIR, --bearer-token-env NAME
            (--env and --header may repeat)
 Other flags: --json prints raw output; --limit N caps search results.
+             --local uses local connectors for add/remove/list/search/call.
+Remote serve requires TAP_REMOTE_TOKEN; TAP_REMOTE_ADMIN_TOKEN overrides admin auth.
+Nonloopback HTTP requires --allow-insecure on both serve and use.

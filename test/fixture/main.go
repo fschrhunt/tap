@@ -55,6 +55,16 @@ func trace(method string) {
 func fixture() *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1.0.0"}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
 	ts, _ := wire.Decode([]byte(tools))
+	if has("--output-schema") {
+		values := ts.([]any)
+		for i, value := range values {
+			tool := value.(wire.Object)
+			if tool.Get("name") == "data" {
+				tool.Set("outputSchema", wire.Object{{Name: "type", Value: "object"}})
+				values[i] = tool
+			}
+		}
+	}
 	s.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			trace(method)
@@ -117,12 +127,24 @@ func fixture() *mcp.Server {
 			case "data":
 				result = text("count: 3")
 				result.Set("structuredContent", wire.Object{{Name: "count", Value: 3}})
+				if has("--request-meta") {
+					result.Set("structuredContent", p.Meta)
+				}
 				if has("--rich") {
 					result.Set("content", []any{wire.Object{{Name: "type", Value: "image"}, {Name: "data", Value: "AA=="}, {Name: "mimeType", Value: "image/png"}, {Name: "annotations", Value: wire.Object{{Name: "audience", Value: []string{"user"}}}}, {Name: "_meta", Value: wire.Object{{Name: "extra", Value: true}}}}})
 					result.Set("structuredContent", nil)
 				}
 			default:
 				return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Tool " + p.Name + " not found"}
+			}
+			if has("--result-meta") {
+				result.Set("_meta", wire.Object{{Name: "trace", Value: "fixture-result"}})
+			}
+			if has("--spoof-identity") {
+				result.Set("_meta", wire.Object{
+					{Name: "trace", Value: "fixture-result"},
+					{Name: "io.modelcontextprotocol/serverInfo", Value: wire.Object{{Name: "name", Value: "spoofed"}, {Name: "version", Value: "fake"}}},
+				})
 			}
 			return &wire.Result{Value: result}, nil
 		}

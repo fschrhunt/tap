@@ -1,4 +1,4 @@
-// Package server exposes tap's two-tool MCP surface over stdio. The SDK answers tools/list and
+// Package server exposes tap's two-tool MCP surface over stdio and HTTP. The SDK answers tools/list and
 // wraps every result, so tap follows whichever MCP revision each client speaks; tap supplies the
 // tools' definitions, argument checks, results and its two JSON-RPC refusals.
 package server
@@ -21,15 +21,33 @@ import (
 const instructions = "MCP tools are reached lazily. Call plugin_search with a capability query to get matching tools as `server.tool` ids plus the input schema, then call one with plugin_call. Nothing else is loaded up front."
 const definitions = "[{\"name\":\"plugin_search\",\"title\":\"Search MCP integrations\",\"description\":\"Find the MCP tools available to you. With a query, returns matching tools with the `id`, input schema, and safety hints needed to call them, plus the total match count and any unreachable server. With no query, lists the configured integrations. Call a result with plugin_call.\",\"inputSchema\":{\"type\":\"object\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"query\":{\"description\":\"Capability to find. Omit to list the integrations instead.\",\"type\":\"string\"},\"limit\":{\"description\":\"Maximum tools to return. Defaults to 8.\",\"type\":\"integer\",\"minimum\":1,\"maximum\":25}}},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":true}},{\"name\":\"plugin_call\",\"title\":\"Call an MCP tool\",\"description\":\"Run a tool discovered with plugin_search. Pass its `id` and an arguments object matching the schema plugin_search returned.\",\"inputSchema\":{\"type\":\"object\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"tool\":{\"type\":\"string\",\"description\":\"Tool id from plugin_search, written as server.tool.\"},\"arguments\":{\"description\":\"Arguments for the tool, matching its input schema.\",\"type\":\"object\",\"propertyNames\":{\"type\":\"string\"},\"additionalProperties\":{}}},\"required\":[\"tool\"]}}]"
 
+// Backend is the shared contract for local engines and remote relays.
+type Backend interface {
+	Listing(context.Context, bool) (wire.Object, error)
+	Search(context.Context, string, float64, bool) (wire.Object, error)
+	Call(context.Context, string, any, bool) (wire.Object, error)
+	CallWithMeta(context.Context, string, any, bool, mcp.Meta) (wire.Object, error)
+	Close()
+}
+
 // Serve runs until stdin closes; its caller closes all downstream connections. The SDK answers
 // tools/list and wraps every result, so both follow whichever protocol revision each client speaks;
 // tap supplies the two tools' definitions, their argument checks and their results.
-func Serve(ctx context.Context, e *registry.Engine) error {
-	var tools []*mcp.Tool
-	if err := json.Unmarshal([]byte(definitions), &tools); err != nil {
+func Serve(ctx context.Context, e Backend, version string) error {
+	s, err := New(e, version)
+	if err != nil {
 		return err
 	}
-	s := mcp.NewServer(&mcp.Implementation{Name: "tap", Version: e.Version}, &mcp.ServerOptions{Instructions: instructions, Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
+	return s.Run(ctx, &mcp.IOTransport{Reader: &shutdownReader{ReadCloser: os.Stdin, close: e.Close}, Writer: stdoutWriter{os.Stdout}})
+}
+
+// New builds the static two-tool surface for stdio or HTTP.
+func New(e Backend, version string) (*mcp.Server, error) {
+	var tools []*mcp.Tool
+	if err := json.Unmarshal([]byte(definitions), &tools); err != nil {
+		return nil, err
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: "tap", Version: version}, &mcp.ServerOptions{Instructions: instructions, Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
 	for _, tool := range tools {
 		name := tool.Name
 		s.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -42,7 +60,7 @@ func Serve(ctx context.Context, e *registry.Engine) error {
 			if err := validate(name, args); err != "" {
 				return toolError("Input validation error: Invalid arguments for tool " + name + ": " + err), nil
 			}
-			return invoke(ctx, e, name, args), nil
+			return invoke(ctx, e, name, args, req.Params.Meta), nil
 		})
 	}
 	// Two refusals keep tap's own JSON-RPC errors: an unknown tool, and arguments that are not an object.
@@ -67,7 +85,7 @@ func Serve(ctx context.Context, e *registry.Engine) error {
 			return next(ctx, method, req)
 		}
 	})
-	return s.Run(ctx, &mcp.IOTransport{Reader: &shutdownReader{ReadCloser: os.Stdin, close: e.Close}, Writer: stdoutWriter{os.Stdout}})
+	return s, nil
 }
 
 // text is one text content item.
@@ -85,8 +103,8 @@ func toolError(message string) *mcp.CallToolResult {
 }
 
 // invoke runs plugin_search or plugin_call. A downstream result passes through as the SDK reads it:
-// its content, error flag and structured content.
-func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Object) *mcp.CallToolResult {
+// its metadata, content, error flag and structured content.
+func invoke(ctx context.Context, e Backend, name string, args wire.Object, meta mcp.Meta) *mcp.CallToolResult {
 	if name == "plugin_search" {
 		query, _ := args.Get("query").(string)
 		var out wire.Object
@@ -110,7 +128,7 @@ func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Obje
 	if values == nil {
 		values = wire.Object{}
 	}
-	result, err := e.Call(ctx, tool, values, false)
+	result, err := e.CallWithMeta(ctx, tool, values, false, meta)
 	if err != nil {
 		return toolError(tool + " failed: " + registry.Message(err) + ". If the tool id or arguments are wrong, run plugin_search to look them up.")
 	}
@@ -121,6 +139,9 @@ func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Obje
 	}
 	isError, _ := result.Get("isError").(bool)
 	out := wire.Object{{Name: "content", Value: content}, {Name: "isError", Value: isError}}
+	if result.Has("_meta") {
+		out.Set("_meta", result.Get("_meta"))
+	}
 	if result.Has("structuredContent") {
 		out.Set("structuredContent", result.Get("structuredContent"))
 	}
@@ -129,6 +150,7 @@ func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Obje
 	if err := json.Unmarshal(b, &passed); err != nil {
 		return toolError(tool + " returned a result tap cannot read: " + err.Error())
 	}
+	passed.Meta = wire.ForwardMeta(passed.Meta)
 	return &passed
 }
 
