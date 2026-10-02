@@ -2,6 +2,8 @@
 
 ## v1.0.2 · 2026-10-02
 
+- A `list_changed` notification that lands while tap is fetching a server's tools is retried,
+  instead of `tap list`, `tap search` or a call failing with `catalog changed during refresh`.
 - A command run without the remote's token variable now names it: `tap: remote
   token environment variable TAP_REMOTE_TOKEN is not set`.
 
