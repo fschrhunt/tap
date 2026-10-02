@@ -333,7 +333,7 @@ func (c *Client) invoke(ctx context.Context, name string, args any, meta mcp.Met
 	if err != nil {
 		return nil, fmt.Errorf("invalid remote result")
 	}
-	v, err := wire.Decode(b)
+	v, err := wire.DecodeExact(b)
 	if err != nil {
 		return nil, fmt.Errorf("invalid remote result")
 	}
@@ -362,7 +362,7 @@ func (c *Client) catalog(ctx context.Context, args any) (wire.Object, error) {
 		return nil, fmt.Errorf("invalid remote catalog")
 	}
 	text, _ := part.Get("text").(string)
-	v, err := wire.Decode([]byte(text))
+	v, err := wire.DecodeExact([]byte(text))
 	if err != nil {
 		return nil, fmt.Errorf("invalid remote catalog")
 	}
@@ -466,11 +466,100 @@ func (c *Client) Close() {
 
 // CallWithMeta preserves request metadata across the stdio relay hop.
 func (c *Client) CallWithMeta(ctx context.Context, id string, args any, quiet bool, meta mcp.Meta) (wire.Object, error) {
-	return c.invoke(ctx, "plugin_call", wire.Object{{Name: "tool", Value: id}, {Name: "arguments", Value: args}}, wire.ForwardMeta(meta))
+	return c.CallWithOptions(ctx, id, args, quiet, false, nil, meta)
+}
+
+// Discover forwards the complete discovery request without opening local connectors.
+func (c *Client) Discover(ctx context.Context, opt registry.SearchOptions, quiet bool) (wire.Object, error) {
+	if opt.Query == "" && opt.Server == "" && len(opt.IDs) == 0 && !opt.Refresh {
+		return c.Search(ctx, "", opt.Limit, quiet)
+	}
+	args := wire.Object{{Name: "limit", Value: opt.Limit}, {Name: "offset", Value: opt.Offset}, {Name: "maxBytes", Value: opt.MaxBytes}, {Name: "refresh", Value: opt.Refresh}}
+	if opt.Query != "" {
+		args.Set("query", opt.Query)
+	}
+	if opt.Server != "" {
+		args.Set("server", opt.Server)
+	}
+	if opt.Detail != "" {
+		args.Set("detail", opt.Detail)
+	}
+	if len(opt.IDs) > 0 {
+		args.Set("ids", opt.IDs)
+	}
+	return c.catalog(ctx, args)
+}
+
+// Refresh performs a blocking live refresh on the host and returns its discovery catalog.
+func (c *Client) Refresh(ctx context.Context, name string, quiet bool) (wire.Object, error) {
+	out, err := c.catalog(ctx, wire.Object{{Name: "server", Value: name}, {Name: "refresh", Value: true}, {Name: "detail", Value: "summary"}})
+	if err != nil {
+		return nil, err
+	}
+	rows, _ := out.Get("catalogs").([]any)
+	return wire.Object{{Name: "integrations", Value: rows}}, nil
+}
+
+// CallWithOptions forwards validated call controls and explicit references over one relay session.
+func (c *Client) CallWithOptions(ctx context.Context, id string, args any, quiet, retain bool, refs []registry.ArgumentReference, meta mcp.Meta) (wire.Object, error) {
+	request := wire.Object{{Name: "tool", Value: id}, {Name: "arguments", Value: args}}
+	if retain {
+		request.Set("resultMode", "reference")
+	}
+	if len(refs) > 0 {
+		values := []any{}
+		for _, ref := range refs {
+			values = append(values, wire.Object{{Name: "target", Value: ref.Target}, {Name: "reference", Value: ref.Reference}, {Name: "pointer", Value: ref.Pointer}})
+		}
+		request.Set("argumentRefs", values)
+	}
+	return c.invoke(ctx, "plugin_call", request, wire.ForwardMeta(meta))
+}
+
+// Inspect reads a reference created on this relay's remote MCP session.
+func (c *Client) Inspect(ctx context.Context, id, pointer string, offset, limit, maxBytes int) (wire.Object, error) {
+	return c.referenceResult(ctx, wire.Object{{Name: "operation", Value: "inspect"}, {Name: "reference", Value: id}, {Name: "pointer", Value: pointer}, {Name: "offset", Value: offset}, {Name: "limit", Value: limit}, {Name: "maxBytes", Value: maxBytes}})
+}
+
+// Drop releases a reference on this relay's remote MCP session.
+func (c *Client) Drop(ctx context.Context, id string) (wire.Object, error) {
+	return c.referenceResult(ctx, wire.Object{{Name: "operation", Value: "drop"}, {Name: "reference", Value: id}})
+}
+
+// referenceResult unwraps inspection text while preserving machine-readable refusal codes.
+func (c *Client) referenceResult(ctx context.Context, args wire.Object) (wire.Object, error) {
+	r, err := c.invoke(ctx, "plugin_call", args, nil)
+	if err != nil {
+		return nil, err
+	}
+	if r.Get("isError") == true {
+		if o, ok := r.Get("structuredContent").(wire.Object); ok {
+			code, _ := o.Get("code").(string)
+			message, _ := o.Get("message").(string)
+			recovery, _ := o.Get("recovery").(string)
+			return nil, &registry.Failure{Code: code, Message: message, Recovery: recovery}
+		}
+		return nil, fmt.Errorf("remote reference operation failed")
+	}
+	content, _ := r.Get("content").([]any)
+	if len(content) != 1 {
+		return nil, fmt.Errorf("invalid remote reference response")
+	}
+	part, _ := content[0].(wire.Object)
+	text, _ := part.Get("text").(string)
+	v, err := wire.DecodeExact([]byte(text))
+	out, ok := v.(wire.Object)
+	if err != nil || !ok {
+		return nil, fmt.Errorf("invalid remote reference response")
+	}
+	return out, nil
 }
 
 // hostedBackend suppresses child stderr and config-derived connection errors on the network.
 type hostedBackend struct{ *registry.Engine }
+
+// ReferenceSessionRequired prevents stateless HTTP clients from sharing an empty reference scope.
+func (e hostedBackend) ReferenceSessionRequired() bool { return true }
 
 // safeCatalog hides connector diagnostics that may contain credentials or commands.
 func safeCatalog(out wire.Object, field string) wire.Object {
@@ -514,9 +603,38 @@ func (e hostedBackend) Call(ctx context.Context, id string, args any, quiet bool
 
 // CallWithMeta forwards application metadata while keeping host diagnostics private.
 func (e hostedBackend) CallWithMeta(ctx context.Context, id string, args any, quiet bool, meta mcp.Meta) (wire.Object, error) {
-	out, err := e.Engine.CallWithMeta(ctx, id, args, true, meta)
+	return e.CallWithOptions(ctx, id, args, quiet, false, nil, meta)
+}
+
+// CallWithOptions keeps precise value-free gateway errors but hides transport/config diagnostics.
+func (e hostedBackend) CallWithOptions(ctx context.Context, id string, args any, quiet, retain bool, refs []registry.ArgumentReference, meta mcp.Meta) (wire.Object, error) {
+	out, err := e.Engine.CallWithOptions(ctx, id, args, true, retain, refs, meta)
 	if err != nil {
+		var failure *registry.Failure
+		if errors.As(err, &failure) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("connector call failed")
 	}
 	return out, nil
+}
+
+// Discover exposes capabilities without host filesystem paths or connector diagnostics.
+func (e hostedBackend) Discover(ctx context.Context, opt registry.SearchOptions, quiet bool) (wire.Object, error) {
+	out, err := e.Engine.Discover(ctx, opt, true)
+	if err != nil {
+		return nil, fmt.Errorf("cannot search remote registry")
+	}
+	safeCatalog(out, "catalogs")
+	return safeCatalog(out, "unavailable"), nil
+}
+
+// Refresh returns live counts with generic errors and no host config path.
+func (e hostedBackend) Refresh(ctx context.Context, name string, quiet bool) (wire.Object, error) {
+	out, err := e.Engine.Refresh(ctx, name, true)
+	if err != nil {
+		return nil, fmt.Errorf("cannot refresh remote registry")
+	}
+	out.Delete("config")
+	return safeCatalog(out, "integrations"), nil
 }

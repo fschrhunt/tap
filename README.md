@@ -14,6 +14,10 @@ tap is one MCP server that stands in for all of yours. Your agent loads two tool
 `plugin_search` and `plugin_call`, instead of every tool from every server, and finds the rest
 when it needs them.
 
+Search or browse capabilities, inspect complete contracts, and call with validated arguments.
+Fresh metadata can be searched without starting backends, even across sessions. Large results can
+optionally stay behind session-local references rather than filling the agent's context.
+
 ## Install
 
 Download the archive for your OS and architecture from
@@ -50,6 +54,9 @@ tap search "create issue"                          # what your agent would find
 
 [Install](docs/install.md) · [Servers](docs/servers.md) · [Command line](docs/cli.md) ·
 [How it works](docs/how-it-works.md) · [Remote](docs/remote.md)
+
+[Benchmarks](bench/README.md) explain reproducible retrieval comparisons and measured task-run
+evaluation. No competitor superiority claim is made without matched end-to-end measurements.
 
 ## License
 

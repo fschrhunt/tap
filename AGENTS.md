@@ -19,12 +19,14 @@ or modify a personal server config for tests.
 - `internal/cli/`: CLI dispatch and output.
 - `internal/config/`: config reads, atomic writes, and environment/home expansion.
 - `internal/registry/`: lazy downstream connections, deadlines, search, calls, and tool cache.
+- `internal/discovery/`: offline field-weighted capability ranking.
+- `cmd/tap-bench/` and `bench/`: frozen retrieval evaluation and recorded-ranking comparisons.
 - `internal/remote/`: authenticated HTTP hosting, remote administration and lazy client relay.
 - `internal/server/`: the two-tool MCP surface.
 - `internal/wire/`: ordered JSON and preservation of raw SDK responses.
 - `test/fixture/`: local stdio/HTTP fixture with success, error, structured, noisy and hang modes.
 - `test/*_test.go`: black-box CLI and MCP tests with temporary configs.
-- `test/testdata/`: tool-definition and help snapshots from the original implementation.
+- `test/testdata/`: the CLI help snapshot.
 - `docs/`: user docs with examples; update them with any user-visible change.
 - `assets/`: the logo, wordmark and lockup SVGs in black and white; see `assets/README.md`.
 

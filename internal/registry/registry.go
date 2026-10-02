@@ -1,4 +1,4 @@
-// Package registry manages bounded downstream sessions and resilient tool catalogs.
+// Package registry manages bounded downstream sessions, resilient catalogs and validated calls.
 // An Engine belongs to one tap process and must be closed.
 package registry
 
@@ -13,13 +13,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/discovery"
 	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -27,37 +26,37 @@ import (
 
 // Engine holds resident sessions and caches for one fixed config path and version.
 type Engine struct {
-	Path, Version string
-	deadline      time.Duration
-	deadlineMS    float64
-	mu            sync.Mutex
-	entries       map[string]*entry
-	ctx           context.Context
-	cancel        context.CancelFunc
-	closeOnce     sync.Once
-	snapshotMu    sync.Mutex
-	indexMu       sync.Mutex
-	indexDirty    chan struct{}
-	indexDone     chan struct{}
-	definitions   map[string]string
-	catalogs      map[string]*catalog
-	indexLoaded   bool
-	slots         chan struct{}
-	failTTL       time.Duration
-	idleTTL       time.Duration
-	workers       sync.WaitGroup
+	Path, Version         string
+	deadline              time.Duration
+	deadlineMS            float64
+	mu                    sync.Mutex
+	entries               map[string]*entry
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	closeOnce             sync.Once
+	snapshotMu, indexMu   sync.Mutex
+	indexDirty, indexDone chan struct{}
+	definitions           map[string]string
+	catalogs              map[string]*catalog
+	indexLoaded           bool
+	slots                 chan struct{}
+	failTTL, idleTTL      time.Duration
+	workers               sync.WaitGroup
+	results               resultStore
+	rankMu                sync.Mutex
+	index                 *discovery.Index
+	indexKey              string
 }
 
 // entry is one connection generation; ready publishes session and err.
 type entry struct {
-	ready       chan struct{}
-	session     *mcp.ClientSession
-	err         error
-	failedAt    time.Time
-	openedAt    time.Time
-	lastUsed    time.Time
-	users       int
-	fingerprint string
+	ready                        chan struct{}
+	session                      *mcp.ClientSession
+	err                          error
+	failedAt, openedAt, lastUsed time.Time
+	users                        int
+	fingerprint                  string
+	idle                         time.Duration
 }
 
 // New creates an engine without opening any downstream connections.
@@ -71,10 +70,7 @@ func New(path, version string) *Engine {
 		durationMS = 1
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	e := &Engine{Path: path, Version: version, deadline: time.Duration(durationMS * float64(time.Millisecond)), deadlineMS: ms, entries: map[string]*entry{}, ctx: ctx, cancel: cancel,
-		indexDirty: make(chan struct{}, 1), indexDone: make(chan struct{}),
-		definitions: map[string]string{}, catalogs: map[string]*catalog{}, slots: make(chan struct{}, 8),
-		failTTL: envDuration("TAP_FAIL_TTL_MS", 5*time.Second), idleTTL: envDuration("TAP_IDLE_TTL_MS", 5*time.Minute)}
+	e := &Engine{Path: path, Version: version, deadline: time.Duration(durationMS * float64(time.Millisecond)), deadlineMS: ms, entries: map[string]*entry{}, ctx: ctx, cancel: cancel, indexDirty: make(chan struct{}, 1), indexDone: make(chan struct{}), definitions: map[string]string{}, catalogs: map[string]*catalog{}, slots: make(chan struct{}, 8), failTTL: envDuration("TAP_FAIL_TTL_MS", 5*time.Second), idleTTL: envDuration("TAP_IDLE_TTL_MS", 5*time.Minute)}
 	e.workers.Add(1)
 	go e.reap()
 	go e.persistIndex()
@@ -129,7 +125,7 @@ func (e *Engine) connect(ctx context.Context, name string, def wire.Object, fing
 		}
 	}
 	if ent == nil {
-		ent = &entry{ready: make(chan struct{}), fingerprint: fingerprint, lastUsed: time.Now()}
+		ent = &entry{ready: make(chan struct{}), fingerprint: fingerprint, lastUsed: time.Now(), idle: e.idleTTL}
 		e.entries[name] = ent
 		e.workers.Add(1)
 		go e.open(name, def, quiet, ent)
@@ -179,21 +175,31 @@ func (e *Engine) open(name string, def wire.Object, quiet bool, ent *entry) {
 		defer cancel()
 		transport, terr := transportFor(name, def, quiet)
 		err = terr
+		if def.Has("idleTimeoutMs") {
+			ms, ok := def.Get("idleTimeoutMs").(float64)
+			if !ok || ms <= 0 || ms > 86400000 || ms != math.Trunc(ms) || !endpointIsStdio(def) {
+				err = fmt.Errorf("idleTimeoutMs must be an integer 1..86400000 for a stdio server")
+			} else {
+				ent.idle = time.Duration(ms) * time.Millisecond
+			}
+		}
 		if err == nil {
-			client := mcp.NewClient(&mcp.Implementation{Name: "tap", Version: e.Version}, &mcp.ClientOptions{
-				Capabilities: &mcp.ClientCapabilities{},
-				ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
-					e.mu.Lock()
-					if c := e.catalogs[name]; c != nil && c.fingerprint == ent.fingerprint {
-						c.at = time.Time{}
-						c.retryAt = time.Time{}
-						c.revision++
+			client := mcp.NewClient(&mcp.Implementation{Name: "tap", Version: e.Version}, &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}, ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+				e.mu.Lock()
+				if c := e.catalogs[name]; c != nil && c.fingerprint == ent.fingerprint {
+					c.at = time.Time{}
+					c.retryAt = time.Time{}
+					c.revision++
+					if e.ctx.Err() == nil {
+						select {
+						case e.indexDirty <- struct{}{}:
+						default:
+						}
 					}
-					e.mu.Unlock()
-				},
-			})
-			// HTTP connections must retain SDK-private initialization hooks for
-			// protocol headers and notifications. Only stdio needs raw capture.
+				}
+				e.mu.Unlock()
+			}})
+			// HTTP must retain SDK-private initialization hooks; only stdio needs raw capture.
 			if _, http := transport.(*mcp.StreamableClientTransport); !http {
 				transport = &wire.Transport{Base: transport}
 			}
@@ -233,6 +239,11 @@ func (e *Engine) closeEntry(ent *entry) {
 	}()
 }
 
+// endpointIsStdio identifies local processes eligible for a per-server idle timeout.
+func endpointIsStdio(def wire.Object) bool {
+	return def.Get("type") == "stdio" || (def.Get("type") == nil && def.Get("url") == nil)
+}
+
 type headerTransport struct{ headers http.Header }
 
 // RoundTrip adds expanded static headers and authentication to every HTTP request.
@@ -259,7 +270,7 @@ func transportFor(name string, def wire.Object, quiet bool) (mcp.Transport, erro
 	if typ == "stdio" {
 		args, _ := def.Get("command").([]any)
 		if len(args) == 0 || wire.String(args[0]) == "" {
-			return nil, fmt.Errorf("server \"%s\" has no command", name)
+			return nil, fmt.Errorf("server %q has no command", name)
 		}
 		argv := make([]string, len(args))
 		for i, a := range args {
@@ -301,10 +312,10 @@ func transportFor(name string, def wire.Object, quiet bool) (mcp.Transport, erro
 		return &commandTransport{CommandTransport: &mcp.CommandTransport{Command: cmd, TerminateDuration: 250 * time.Millisecond}, name: config.Home(argv[0])}, nil
 	}
 	if typ != "http" {
-		return nil, fmt.Errorf("server \"%s\" has unsupported type \"%s\"", name, typ)
+		return nil, fmt.Errorf("server %q has unsupported type %q", name, typ)
 	}
 	if endpoint == "" {
-		return nil, fmt.Errorf("server \"%s\" has no url", name)
+		return nil, fmt.Errorf("server %q has no url", name)
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -319,30 +330,42 @@ func transportFor(name string, def wire.Object, quiet bool) (mcp.Transport, erro
 	if token, ok := def.Get("bearerTokenEnv").(string); ok && os.Getenv(token) != "" {
 		headers.Set("Authorization", "Bearer "+os.Getenv(token))
 	}
-	return &mcp.StreamableClientTransport{
-		Endpoint: endpoint,
-		HTTPClient: &http.Client{
-			Transport:     headerTransport{headers},
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
-		MaxRetries: -1,
-	}, nil
+	return &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &http.Client{Transport: headerTransport{headers}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1}, nil
 }
 
 type serverTools struct {
-	name  string
-	tools []wire.Object
-	err   string
-	stale bool
+	name    string
+	tools   []wire.Object
+	err     string
+	stale   bool
+	catalog catalog
+	cached  bool
 }
 
 // allTools queries configured servers in parallel while retaining registry order.
 func (e *Engine) allTools(ctx context.Context, quiet bool) ([]serverTools, error) {
+	return e.selectedTools(ctx, "", quiet, false)
+}
+
+// selectedTools uses one snapshot for scoped or full discovery.
+func (e *Engine) selectedTools(ctx context.Context, server string, quiet, refresh bool) ([]serverTools, error) {
 	snapshot, err := e.snapshot()
 	if err != nil {
 		return nil, err
 	}
 	servers := snapshot.servers
+	if server != "" {
+		def, ok := servers.Get(server).(wire.Object)
+		if !ok {
+			return nil, fmt.Errorf("unknown server %q", server)
+		}
+		servers = wire.Object{{Name: server, Value: def}}
+	}
+	return e.rowsFor(ctx, servers, snapshot.fingerprints, quiet, refresh)
+}
+
+// rowsFor shares refreshes while reporting cached metadata separately from live availability.
+func (e *Engine) rowsFor(ctx context.Context, servers wire.Object, fingerprints map[string]string, quiet, force bool) ([]serverTools, error) {
 	rows := make([]serverTools, len(servers))
 	var wg sync.WaitGroup
 	for i, f := range servers {
@@ -350,15 +373,28 @@ func (e *Engine) allTools(ctx context.Context, quiet bool) ([]serverTools, error
 		go func() {
 			defer wg.Done()
 			def, _ := f.Value.(wire.Object)
-			tools, stale, err := e.toolsFor(ctx, f.Name, def, snapshot.fingerprints[f.Name], quiet)
-			rows[i] = serverTools{name: f.Name, tools: tools, stale: stale}
+			var tools []wire.Object
+			var stale bool
+			var err error
+			e.mu.Lock()
+			c := e.catalogs[f.Name]
+			cached := c != nil && c.good
+			e.mu.Unlock()
+			if force {
+				tools, err = e.liveTools(ctx, f.Name, def, fingerprints[f.Name], quiet, nil)
+				stale = err != nil
+			} else {
+				tools, stale, err = e.toolsFor(ctx, f.Name, def, fingerprints[f.Name], quiet)
+			}
+			e.mu.Lock()
+			var view catalog
+			if c := e.catalogs[f.Name]; c != nil {
+				view = catalog{fingerprint: c.fingerprint, tools: tools, at: c.at, instructions: c.instructions, revision: c.revision}
+			}
+			e.mu.Unlock()
+			rows[i] = serverTools{name: f.Name, tools: tools, stale: stale, catalog: view, cached: cached && !force}
 			if err != nil {
-				msg := Message(err)
-				var neterr *url.Error
-				if errors.As(err, &neterr) {
-					msg = "fetch failed"
-				}
-				rows[i].err = msg
+				rows[i].err = Message(err)
 			}
 		}()
 	}
@@ -366,9 +402,20 @@ func (e *Engine) allTools(ctx context.Context, quiet bool) ([]serverTools, error
 	return rows, nil
 }
 
-// Listing returns catalog counts, marking stale rows and their last refresh errors.
+// Listing returns catalog counts, marking stale rows and last refresh errors.
 func (e *Engine) Listing(ctx context.Context, quiet bool) (wire.Object, error) {
 	rows, err := e.allTools(ctx, quiet)
+	return e.listingRows(rows, err)
+}
+
+// Refresh waits for live discovery of the selected server or all integrations.
+func (e *Engine) Refresh(ctx context.Context, server string, quiet bool) (wire.Object, error) {
+	rows, err := e.selectedTools(ctx, server, quiet, true)
+	return e.listingRows(rows, err)
+}
+
+// listingRows distinguishes cached catalogs from live availability checks.
+func (e *Engine) listingRows(rows []serverTools, err error) (wire.Object, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -384,147 +431,107 @@ func (e *Engine) Listing(ctx context.Context, quiet bool) (wire.Object, error) {
 		if r.err != "" {
 			row.Set("error", r.err)
 		}
+		row.Set("source", map[bool]string{true: "cache", false: "live"}[r.cached])
+		row.Set("observedAt", r.catalog.at.UTC().Format(time.RFC3339Nano))
+		availability := "not_checked"
+		if !r.cached && r.err == "" {
+			availability = "reachable"
+		}
+		row.Set("availability", availability)
 		integrations = append(integrations, row)
 	}
 	return wire.Object{{Name: "config", Value: e.Path}, {Name: "integrations", Value: integrations}}, nil
 }
 
-var camel = regexp.MustCompile(`([a-z0-9])([A-Z])`)
-var punctuation = regexp.MustCompile(`[^a-z0-9]+`)
-
-// tokenize makes camelCase, underscores and punctuation comparable for scoring.
-func tokenize(s string) []string {
-	s = strings.ToLower(camel.ReplaceAllString(s, "$1 $2"))
-	out := []string{}
-	for _, t := range punctuation.Split(s, -1) {
-		if t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-type match struct {
-	rank int
-	tool wire.Object
-}
-
-// Search ranks tools matching every query term and applies JavaScript slice limits.
-// Stale tools remain searchable alongside diagnostics for failed refreshes.
-// CLI limits intentionally retain Node's unconstrained behavior; MCP validates 1..25.
-func (e *Engine) Search(ctx context.Context, query string, limit float64, quiet bool) (wire.Object, error) {
-	rows, err := e.allTools(ctx, quiet)
-	if err != nil {
-		return nil, err
-	}
-	tokens := tokenize(query)
-	ranked := []match{}
-	unavailable := []any{}
-	for _, r := range rows {
-		if r.err != "" {
-			unavailable = append(unavailable, wire.Object{{Name: "server", Value: r.name}, {Name: "error", Value: r.err}})
-		}
-		for _, t := range r.tools {
-			name, _ := t.Get("name").(string)
-			title, _ := t.Get("title").(string)
-			desc, _ := t.Get("description").(string)
-			hay := strings.ToLower(name + " " + r.name + " " + title + " " + desc)
-			names := tokenize(name)
-			rank := 0
-			for _, token := range tokens {
-				if !strings.Contains(hay, token) {
-					rank = 0
-					break
-				}
-				rank++
-				for _, n := range names {
-					if n == token {
-						rank += 2
-						break
-					}
-				}
-			}
-			if rank > 0 {
-				tool := wire.Object{{Name: "id", Value: r.name + "." + name}}
-				if r.stale {
-					tool.Set("stale", true)
-				}
-				for _, k := range []string{"title", "description", "inputSchema", "annotations", "outputSchema"} {
-					if t.Has(k) {
-						tool.Set(k, t.Get(k))
-					}
-				}
-				ranked = append(ranked, match{rank, tool})
-			}
-		}
-	}
-	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].rank > ranked[j].rank })
-	n := len(ranked)
-	end := n
-	if limit < float64(n) {
-		if limit <= -float64(n) {
-			end = 0
-		} else {
-			end = int(limit)
-			if end < 0 {
-				end = n + end
-			}
-		}
-	} else if limit != limit {
-		end = 0
-	}
-	matches := []any{}
-	for _, m := range ranked[:end] {
-		matches = append(matches, m.tool)
-	}
-	out := wire.Object{{Name: "query", Value: query}, {Name: "total", Value: n}, {Name: "matches", Value: matches}, {Name: "unavailable", Value: unavailable}}
-	if n == 0 && len(unavailable) == 0 {
-		out.Set("hint", "No tool matched every term. Try fewer or broader terms, or omit the query to list the configured servers.")
-	}
-	return out, nil
-}
-
-// Call runs server.tool, retaining raw stdio results and SDK-supported HTTP result fields.
+// Call validates and runs server.tool with inline results.
 func (e *Engine) Call(ctx context.Context, id string, args any, quiet bool) (wire.Object, error) {
 	return e.CallWithMeta(ctx, id, args, quiet, nil)
 }
 
-// CallWithMeta forwards application metadata, leaving protocol negotiation to each SDK session.
+// CallWithMeta forwards application metadata without forwarding protocol negotiation fields.
 func (e *Engine) CallWithMeta(ctx context.Context, id string, args any, quiet bool, meta mcp.Meta) (wire.Object, error) {
+	return e.CallWithOptions(ctx, id, args, quiet, false, nil, meta)
+}
+
+// CallWith enables explicit result retention and reference copies without application metadata.
+func (e *Engine) CallWith(ctx context.Context, id string, args any, quiet, retain bool, refs []ArgumentReference) (wire.Object, error) {
+	return e.CallWithOptions(ctx, id, args, quiet, retain, refs, nil)
+}
+
+// CallWithOptions enforces policy and a live contract before execution; calls are never retried.
+func (e *Engine) CallWithOptions(ctx context.Context, id string, args any, quiet, retain bool, refs []ArgumentReference, meta mcp.Meta) (wire.Object, error) {
 	dot := strings.Index(id, ".")
-	if dot < 1 {
-		return nil, fmt.Errorf("invalid tool id \"%s\" (expected server.tool)", id)
+	if dot < 1 || dot == len(id)-1 {
+		return nil, fmt.Errorf("invalid tool id %q (expected server.tool)", id)
 	}
 	name, tool := id[:dot], id[dot+1:]
 	snapshot, err := e.snapshot()
 	if err != nil {
 		return nil, err
 	}
-	servers := snapshot.servers
-	def, ok := servers.Get(name).(wire.Object)
+	def, ok := snapshot.servers.Get(name).(wire.Object)
 	if !ok {
-		names := make([]string, len(servers))
-		for i, f := range servers {
-			names[i] = f.Name
+		return nil, &Failure{"unknown_server", "unknown server", "List configured servers with plugin_search."}
+	}
+	if err = checkPolicy(def, tool); err != nil {
+		return nil, err
+	}
+	if len(refs) > 0 {
+		args, err = e.resolveReferences(ctx, name, args, refs, snapshot.servers)
+		if err != nil {
+			return nil, err
 		}
-		known := strings.Join(names, ", ")
-		if known == "" {
-			known = "none"
-		}
-		return nil, fmt.Errorf("unknown server %q (configured: %s)", name, known)
 	}
 	cctx, cancel := context.WithTimeout(ctx, e.deadline)
 	ent, err := e.connect(cctx, name, def, snapshot.fingerprints[name], quiet)
-	err = e.deadlineError(cctx, err)
 	cancel()
+	if err != nil {
+		return nil, &causedFailure{&Failure{"server_unavailable", "server could not be connected", "Check configuration or authentication. No tools/call was sent."}, err}
+	}
+	defer e.release(ent)
+	tools, err := e.liveTools(ctx, name, def, snapshot.fingerprints[name], quiet, ent)
+	if err != nil {
+		return nil, &causedFailure{&Failure{"catalog_unavailable", "live tool catalog could not be read", "Check server availability. No tools/call was sent."}, err}
+	}
+	var schema any
+	for _, t := range tools {
+		if t.Get("name") == tool {
+			schema = t.Get("inputSchema")
+			break
+		}
+	}
+	if schema == nil {
+		return nil, &Failure{"unknown_tool", "tool is absent from the live server catalog", "Browse this server with plugin_search server and refresh true."}
+	}
+	if err = validateArguments(schema, args); err != nil {
+		return nil, err
+	}
+	current, err := e.snapshot()
 	if err != nil {
 		return nil, err
 	}
-	defer e.release(ent)
+	e.mu.Lock()
+	c := e.catalogs[name]
+	same := e.entries[name] == ent && current.fingerprints[name] == ent.fingerprint && c != nil && c.session == ent && time.Since(c.at) < catalogTTL
+	if same {
+		same = false
+		validated, _ := wire.JSON(schema, false)
+		for _, t := range c.tools {
+			if t.Get("name") == tool {
+				advertised, _ := wire.JSON(t.Get("inputSchema"), false)
+				same = string(validated) == string(advertised)
+				break
+			}
+		}
+	}
+	e.mu.Unlock()
+	if !same {
+		return nil, &Failure{"stale_schema", "configuration or tool catalog changed before the call", "Refresh and inspect the tool. No tools/call was sent."}
+	}
 	cctx, raw := wire.Capture(ctx)
 	result, err := ent.session.CallTool(cctx, &mcp.CallToolParams{Name: tool, Arguments: args, Meta: wire.ForwardMeta(meta)})
 	if err != nil {
-		return nil, err
+		return nil, &causedFailure{&Failure{"call_outcome_unknown", "downstream tool call failed at the protocol or transport layer", "The operation may have run. Verify external state before retrying a write; tap never retries calls automatically."}, err}
 	}
 	if len(*raw) == 0 {
 		*raw, err = wire.JSON(result, false)
@@ -532,16 +539,19 @@ func (e *Engine) CallWithMeta(ctx context.Context, id string, args any, quiet bo
 			return nil, err
 		}
 	}
-	v, err := wire.Decode(*raw)
+	v, err := wire.DecodeExact(*raw)
 	if err != nil {
 		return nil, err
 	}
 	o, _ := v.(wire.Object)
-	return ordered(o, "_meta", "content", "structuredContent", "isError"), nil
+	o = ordered(o, "_meta", "content", "structuredContent", "isError")
+	if retain {
+		return e.results.retainScoped(ctx, name, o, *raw), nil
+	}
+	return o, nil
 }
 
 // Close waits for workers, flushes queued catalogs, and tears down every transport.
-// It is safe after failed or partial connects.
 func (e *Engine) Close() {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
@@ -564,11 +574,10 @@ func (e *Engine) Close() {
 			}()
 		}
 		wg.Wait()
-
 	})
 }
 
-// ordered mirrors the TypeScript SDK's known-field-first JSON decoding.
+// ordered retains known-field-first JSON ordering without dropping extension fields.
 func ordered(o wire.Object, names ...string) wire.Object {
 	out := wire.Object{}
 	for _, name := range names {
@@ -584,7 +593,7 @@ func ordered(o wire.Object, names ...string) wire.Object {
 	return out
 }
 
-// commandTransport retains Node's spawn diagnostics around the SDK transport.
+// commandTransport retains familiar spawn diagnostics around the SDK transport.
 type commandTransport struct {
 	*mcp.CommandTransport
 	name string

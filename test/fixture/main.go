@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fschrhunt/tap/internal/wire"
@@ -53,17 +54,31 @@ func trace(method string) {
 // fixture builds the same three tools as the original Node fixture, with optional
 // transport and lifecycle probes for behavior that was not covered by that suite.
 func fixture() *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1.0.0"}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
+	s := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1.0.0"}, &mcp.ServerOptions{Instructions: "Fixture guidance: supply the documented fields. This is server-provided content.", Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
 	ts, _ := wire.Decode([]byte(tools))
+	var catalogMu sync.Mutex
+	if has("--large-schema") {
+		list := ts.([]any)
+		echo := list[0].(wire.Object)
+		schema := echo.Get("inputSchema").(wire.Object)
+		schema.Set("description", strings.Repeat("schema documentation ", 3000))
+		echo.Set("inputSchema", schema)
+		list[0] = echo
+		ts = list
+	}
 	if has("--output-schema") {
-		values := ts.([]any)
-		for i, value := range values {
-			tool := value.(wire.Object)
-			if tool.Get("name") == "data" {
-				tool.Set("outputSchema", wire.Object{{Name: "type", Value: "object"}})
-				values[i] = tool
-			}
-		}
+		list := ts.([]any)
+		data := list[2].(wire.Object)
+		data.Set("outputSchema", wire.Object{{Name: "type", Value: "object"}, {Name: "properties", Value: wire.Object{{Name: "count", Value: wire.Object{{Name: "type", Value: "integer"}}}}}})
+		list[2] = data
+		ts = list
+	}
+	if has("--remote-schema") {
+		list := ts.([]any)
+		echo := list[0].(wire.Object)
+		echo.Set("inputSchema", wire.Object{{Name: "type", Value: "object"}, {Name: "$ref", Value: "https://example.invalid/schema.json"}})
+		list[0] = echo
+		ts = list
 	}
 	s.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -79,9 +94,19 @@ func fixture() *mcp.Server {
 				if has("--delay-list") {
 					time.Sleep(300 * time.Millisecond)
 				}
-				list := ts
+				catalogMu.Lock()
+				raw, _ := wire.JSON(ts, false)
+				list, _ := wire.Decode(raw)
+				catalogMu.Unlock()
 				if has("--empty") {
 					list = []any{}
+				}
+				if has("--paged") {
+					cursor := req.GetParams().(*mcp.ListToolsParams).Cursor
+					if cursor == "" {
+						return &wire.Result{Value: wire.Object{{Name: "tools", Value: list.([]any)[:1]}, {Name: "nextCursor", Value: "second"}}}, nil
+					}
+					return &wire.Result{Value: wire.Object{{Name: "tools", Value: list.([]any)[1:]}}}, nil
 				}
 				return &wire.Result{Value: wire.Object{{Name: "tools", Value: list}}}, nil
 			}
@@ -127,12 +152,40 @@ func fixture() *mcp.Server {
 			case "data":
 				result = text("count: 3")
 				result.Set("structuredContent", wire.Object{{Name: "count", Value: 3}})
+				if has("--numeric") {
+					v, _ := wire.DecodeExact(req.GetParams().(*mcp.CallToolParamsRaw).Arguments)
+					args, _ := v.(wire.Object)
+					result.Set("structuredContent", wire.Object{{Name: "id", Value: args.Get("id")}})
+				}
+				if has("--large-result") {
+					rows := []any{}
+					for i := 0; i < 1000; i++ {
+						rows = append(rows, wire.Object{{Name: "index", Value: i}, {Name: "text", Value: strings.Repeat("payload ", 30)}})
+					}
+					result.Set("structuredContent", wire.Object{{Name: "rows", Value: rows}, {Name: "text", Value: "copied without model recitation"}, {Name: "a/b~c", Value: nil}})
+				}
 				if has("--request-meta") {
 					result.Set("structuredContent", p.Meta)
 				}
 				if has("--rich") {
 					result.Set("content", []any{wire.Object{{Name: "type", Value: "image"}, {Name: "data", Value: "AA=="}, {Name: "mimeType", Value: "image/png"}, {Name: "annotations", Value: wire.Object{{Name: "audience", Value: []string{"user"}}}}, {Name: "_meta", Value: wire.Object{{Name: "extra", Value: true}}}}})
 					result.Set("structuredContent", nil)
+				}
+				if has("--notify") {
+					catalogMu.Lock()
+					list := ts.([]any)
+					echo := list[0].(wire.Object)
+					echo.Set("description", "Updated echo contract after tools/list_changed.")
+					list[0] = echo
+					ts = list
+					catalogMu.Unlock()
+					// Adding a signal tool emits a real SDK notification; catalog middleware controls its visible list.
+					s.AddTool(&mcp.Tool{Name: "changed", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+						return &mcp.CallToolResult{}, nil
+					})
+				}
+				if has("--protocol-error") {
+					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "simulated failure after executing the operation"}
 				}
 			default:
 				return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Tool " + p.Name + " not found"}

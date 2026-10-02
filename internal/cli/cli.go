@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/fschrhunt/tap/internal/remote"
 	"io"
+	"path"
+	"strconv"
 	"strings"
 
 	"github.com/fschrhunt/tap/internal/config"
@@ -23,6 +25,8 @@ const usage = `tap %s — Less noise. Better agents.
   tap add <name> -- <cmd>  add a stdio server (everything after -- is the command)
   tap remove <name>        remove a server
   tap search <query>       find tools, with the schemas needed to call them
+  tap inspect <server.tool> inspect a complete tool contract
+  tap refresh [server]     refresh cached metadata and check availability
   tap call <server.tool> [k=v ...] [--args '<json>']
   tap remote serve [--addr 127.0.0.1:7777] [--tls-cert FILE --tls-key FILE]
   tap remote use URL [--token-env NAME] [--allow-insecure]
@@ -32,9 +36,13 @@ const usage = `tap %s — Less noise. Better agents.
   tap version              print the version
 
 Add flags: --env K=V, --header K=V, --cwd DIR, --bearer-token-env NAME
-           (--env and --header may repeat)
+           --allow-tool GLOB, --deny-tool GLOB, --reference-to SERVER,
+           --idle-timeout-ms N (stdio idle override; backend state is lost)
+           (--env, --header and policy flags may repeat)
 Other flags: --json prints raw output; --limit N caps search results.
-             --local uses local connectors for add/remove/list/search/call.
+Search flags: --server NAME, --detail auto|full|summary, --offset N,
+              --max-bytes N, --refresh. Default CLI detail: full.
+             --local uses local connectors for add/remove/list/search/call/inspect/refresh.
 Remote serve requires TAP_REMOTE_TOKEN; TAP_REMOTE_ADMIN_TOKEN overrides admin auth.
 Nonloopback HTTP requires --allow-insecure on both serve and use.`
 
@@ -66,6 +74,20 @@ func take(args *[]string, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// takeValue distinguishes an absent option from a present option missing its value.
+func takeValue(args *[]string, name string) (string, bool, error) {
+	for i, s := range *args {
+		if s == name {
+			if i+1 == len(*args) {
+				return "", true, fmt.Errorf("%s needs a value", name)
+			}
+			value, _ := take(args, name)
+			return value, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // boolean removes exactly one occurrence of a boolean option.
@@ -142,7 +164,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 	}
 	var backend server.Backend = e
 	var relay *remote.Client
-	if !local && (len(args) == 0 || args[0] == "add" || args[0] == "remove" || args[0] == "search" || args[0] == "call" || args[0] == "list") {
+	if !local && (len(args) == 0 || args[0] == "add" || args[0] == "remove" || args[0] == "search" || args[0] == "call" || args[0] == "list" || args[0] == "inspect" || args[0] == "refresh") {
 		cfg, err := config.LoadRemote(e.Path)
 		if err != nil {
 			return 1, err
@@ -210,11 +232,54 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		}
 		cwd, _ := take(&args, "--cwd")
 		bearer, _ := take(&args, "--bearer-token-env")
+		policy := wire.Object{}
+		for _, f := range []struct{ flag, key string }{{"--allow-tool", "allow"}, {"--deny-tool", "deny"}, {"--reference-to", "referenceTo"}} {
+			values := []any{}
+			for {
+				v, ok, err := takeValue(&args, f.flag)
+				if err != nil {
+					return 1, err
+				}
+				if !ok {
+					break
+				}
+				if v == "" {
+					return 1, fmt.Errorf("%s needs a nonempty value", f.flag)
+				}
+				if f.key != "referenceTo" {
+					if _, err := path.Match(v, ""); err != nil {
+						return 1, fmt.Errorf("%s needs a valid glob pattern", f.flag)
+					}
+				}
+				values = append(values, v)
+			}
+			if len(values) > 0 {
+				policy.Set(f.key, values)
+			}
+		}
+		idle, idleSet, err := takeValue(&args, "--idle-timeout-ms")
+		if err != nil {
+			return 1, err
+		}
+		var idleMS int
+		if idleSet {
+			var err error
+			idleMS, err = strconv.Atoi(idle)
+			if err != nil || idleMS < 1 || idleMS > 86400000 {
+				return 1, fmt.Errorf("--idle-timeout-ms expects 1..86400000")
+			}
+		}
 		if len(rest) > 0 {
 			if len(rest) == 1 {
 				return 1, fmt.Errorf("usage: tap add <name> -- <command> [args...]")
 			}
 			def := wire.Object{{Name: "type", Value: "stdio"}, {Name: "command", Value: rest[1:]}}
+			if len(policy) > 0 {
+				def.Set("policy", policy)
+			}
+			if idleSet {
+				def.Set("idleTimeoutMs", idleMS)
+			}
 			if len(env) > 0 {
 				def.Set("env", env)
 			}
@@ -231,6 +296,12 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			return 1, fmt.Errorf("usage: tap add <name> <url> | tap add <name> -- <command> [args...]")
 		}
 		def := wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: args[0]}}
+		if idleSet {
+			return 1, fmt.Errorf("--idle-timeout-ms is only valid for stdio servers")
+		}
+		if len(policy) > 0 {
+			def.Set("policy", policy)
+		}
 		if len(headers) > 0 {
 			def.Set("headers", headers)
 		}
@@ -257,7 +328,13 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		}
 		return 0, nil
 	case "list":
-		result, err := backend.Listing(ctx, true)
+		var result wire.Object
+		var err error
+		if boolean(&args, "--refresh") {
+			result, err = backend.Refresh(ctx, "", true)
+		} else {
+			result, err = backend.Listing(ctx, true)
+		}
 		if err != nil {
 			return 1, err
 		}
@@ -281,6 +358,9 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			if row.Has("error") {
 				summary = "unavailable: " + wire.String(row.Get("error"))
 			}
+			if row.Get("source") == "cache" {
+				summary += " (cached; availability not checked)"
+			}
 			if row.Get("stale") == true {
 				summary += " (stale catalog)"
 			}
@@ -288,13 +368,71 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		}
 		print(out, strings.Join(lines, "\n"), false)
 		return 0, nil
+	case "refresh":
+		if len(args) > 1 {
+			return 1, fmt.Errorf("usage: tap refresh [server]")
+		}
+		server := ""
+		if len(args) > 0 {
+			server = args[0]
+		}
+		result, err := backend.Refresh(ctx, server, true)
+		if err != nil {
+			return 1, err
+		}
+		print(out, result, true)
+		return 0, nil
+	case "inspect":
+		if len(args) != 1 {
+			return 1, fmt.Errorf("usage: tap inspect <server.tool>")
+		}
+		result, err := backend.Discover(ctx, registry.SearchOptions{IDs: args, Detail: "full", Limit: 25, MaxBytes: 16777216}, true)
+		if err != nil {
+			return 1, err
+		}
+		print(out, result, true)
+		return 0, nil
 	case "search":
 		limit := float64(8)
 		raw, present := take(&args, "--limit")
 		if present {
 			limit = wire.Number(raw)
 		}
-		result, err := backend.Search(ctx, strings.Join(args, " "), limit, true)
+		server, _, err := takeValue(&args, "--server")
+		if err != nil {
+			return 1, err
+		}
+		detail, ok, err := takeValue(&args, "--detail")
+		if err != nil {
+			return 1, err
+		}
+		if !ok {
+			detail = "full"
+		}
+		if detail != "auto" && detail != "full" && detail != "summary" {
+			return 1, fmt.Errorf("--detail expects auto, full or summary")
+		}
+		offset := 0
+		budget := 16777216
+		for _, f := range []struct {
+			flag     string
+			dest     *int
+			min, max int
+		}{{"--offset", &offset, 0, 1000000}, {"--max-bytes", &budget, 1024, 16777216}} {
+			raw, ok, err := takeValue(&args, f.flag)
+			if err != nil {
+				return 1, err
+			}
+			if ok {
+				v, err := strconv.Atoi(raw)
+				if err != nil || v < f.min || v > f.max {
+					return 1, fmt.Errorf("%s expects %d..%d", f.flag, f.min, f.max)
+				}
+				*f.dest = v
+			}
+		}
+		refresh := boolean(&args, "--refresh")
+		result, err := backend.Discover(ctx, registry.SearchOptions{Query: strings.Join(args, " "), Server: server, Detail: detail, Limit: limit, Offset: offset, MaxBytes: budget, Refresh: refresh}, true)
 		if err != nil {
 			return 1, err
 		}
@@ -321,8 +459,9 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			lines = append(lines, hint)
 		}
 		total := int(wire.Number(wire.String(result.Get("total"))))
-		if total > len(matches) {
-			lines = append(lines, fmt.Sprintf("(%d more; raise --limit to see them)", total-len(matches)))
+		if result.Has("nextOffset") {
+			next := int(wire.Number(wire.String(result.Get("nextOffset"))))
+			lines = append(lines, fmt.Sprintf("(%d more; continue with --offset %d)", total-next, next))
 		}
 		for _, v := range result.Get("unavailable").([]any) {
 			row := v.(wire.Object)
@@ -381,7 +520,7 @@ func toolArgs(args []string) (any, error) {
 	raw, _ := take(&args, "--args")
 	var values any
 	if raw != "" {
-		v, err := wire.Decode([]byte(raw))
+		v, err := wire.DecodeExact([]byte(raw))
 		if err != nil {
 			return nil, fmt.Errorf("%s", config.JSONError([]byte(raw), err))
 		}

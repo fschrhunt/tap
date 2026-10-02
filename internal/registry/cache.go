@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fschrhunt/tap/internal/config"
@@ -16,15 +18,20 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const catalogTTL = time.Minute
+const maxCatalogBytes = 16 << 20
+
 // catalog is guarded by Engine.mu; published tool objects are immutable.
 type catalog struct {
-	fingerprint string
-	tools       []wire.Object
-	at, retryAt time.Time
-	good        bool
-	refreshing  chan struct{}
-	err         error
-	revision    uint64
+	fingerprint  string
+	tools        []wire.Object
+	at, retryAt  time.Time
+	good         bool
+	refreshing   chan struct{}
+	err          error
+	revision     uint64
+	instructions string
+	session      *entry
 }
 
 // envDuration accepts zero for deterministic retry tests.
@@ -35,20 +42,26 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// definitionFingerprint hashes configuration and expanded connection inputs only;
-// credentials never appear in the persisted index.
+// definitionFingerprint hashes configured/expanded inputs and inherited child credentials.
+// Only a digest, never connection definitions or credentials, enters the persisted index.
 func definitionFingerprint(def any) string {
 	b, _ := wire.JSON(def, false)
-	token := ""
+	token, inherited := "", ""
 	if o, ok := def.(wire.Object); ok {
 		if name, ok := o.Get("bearerTokenEnv").(string); ok {
 			token = os.Getenv(name)
 		}
+		if endpointIsStdio(o) {
+			env := os.Environ()
+			sort.Strings(env)
+			cwd, _ := os.Getwd()
+			inherited = cwd + "\x00" + strings.Join(env, "\x00")
+		}
 	}
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(config.Expand(string(b))+"\x00"+token+"\x00"+os.Getenv("HOME")+"\x00"+os.Getenv("PATH"))))
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(config.Expand(string(b))+"\x00"+token+"\x00"+os.Getenv("HOME")+"\x00"+os.Getenv("PATH")+"\x00"+inherited)))
 }
 
-// configSnapshot keeps definitions and their fingerprints together through fanout.
+// configSnapshot keeps definitions and fingerprints together through fanout.
 type configSnapshot struct {
 	servers      wire.Object
 	fingerprints map[string]string
@@ -68,6 +81,9 @@ func (e *Engine) snapshot() (*configSnapshot, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.ctx.Err() != nil {
+		return nil, e.ctx.Err()
+	}
 	for name, ent := range e.entries {
 		if definitions[name] != ent.fingerprint {
 			delete(e.entries, name)
@@ -87,9 +103,8 @@ func (e *Engine) snapshot() (*configSnapshot, error) {
 	return &configSnapshot{servers: servers, fingerprints: definitions}, nil
 }
 
-// toolsFor returns tools, their stale status, and the last refresh error together.
-// Successful catalogs return immediately while sharing one refresh.
-// A cold caller may cancel its wait without cancelling shared work.
+// toolsFor returns tools, stale status and last refresh error together.
+// Warm callers return immediately during one shared refresh; cold waits may cancel independently.
 func (e *Engine) toolsFor(ctx context.Context, name string, def wire.Object, fingerprint string, quiet bool) ([]wire.Object, bool, error) {
 	e.mu.Lock()
 	if e.ctx.Err() != nil {
@@ -105,7 +120,7 @@ func (e *Engine) toolsFor(ctx context.Context, name string, def wire.Object, fin
 		c = &catalog{fingerprint: fingerprint}
 		e.catalogs[name] = c
 	}
-	if c.good && time.Since(c.at) < time.Minute {
+	if c.good && time.Since(c.at) < catalogTTL {
 		tools := c.tools
 		e.mu.Unlock()
 		return tools, false, nil
@@ -133,13 +148,60 @@ func (e *Engine) toolsFor(ctx context.Context, name string, def wire.Object, fin
 	case <-done:
 		e.mu.Lock()
 		tools, err := c.tools, c.err
-		stale := c.good && time.Since(c.at) >= time.Minute
+		stale := c.good && time.Since(c.at) >= catalogTTL
 		e.mu.Unlock()
 		return tools, stale, err
 	}
 }
 
-// refresh publishes only a complete paginated list; failure preserves prior tools.
+// liveTools waits for a successful catalog belonging to the calling session.
+// A nil session requests an explicit refresh; stale descriptors are never used to validate calls.
+func (e *Engine) liveTools(ctx context.Context, name string, def wire.Object, fingerprint string, quiet bool, ent *entry) ([]wire.Object, error) {
+	e.mu.Lock()
+	if e.ctx.Err() != nil {
+		e.mu.Unlock()
+		return nil, e.ctx.Err()
+	}
+	if e.definitions[name] != fingerprint {
+		e.mu.Unlock()
+		return nil, fmt.Errorf("server configuration changed")
+	}
+	c := e.catalogs[name]
+	if c == nil {
+		c = &catalog{fingerprint: fingerprint}
+		e.catalogs[name] = c
+	}
+	if ent != nil && c.good && c.session == ent && time.Since(c.at) < catalogTTL && c.err == nil {
+		tools := c.tools
+		e.mu.Unlock()
+		return tools, nil
+	}
+	if c.refreshing == nil {
+		c.at = time.Time{}
+		c.retryAt = time.Time{}
+		c.refreshing = make(chan struct{})
+		e.workers.Add(1)
+		go e.refresh(name, def, quiet, c)
+	}
+	done := c.refreshing
+	e.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-done:
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if c.err != nil {
+		return nil, c.err
+	}
+	if e.catalogs[name] != c || !c.good || time.Since(c.at) >= catalogTTL || (ent != nil && c.session != ent) {
+		return nil, fmt.Errorf("catalog changed during refresh")
+	}
+	return c.tools, nil
+}
+
+// refresh publishes only complete lists; failures preserve prior tools and back off.
 func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	defer e.workers.Done()
 	e.mu.Lock()
@@ -150,8 +212,6 @@ func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	var tools []wire.Object
 	if err == nil {
 		defer e.release(ent)
-		// Admission wait does not spend the server budget. Initialization and listing
-		// still share the budget, including a connect that was already in flight.
 		if ent.openedAt.After(began) {
 			began = ent.openedAt
 		}
@@ -168,6 +228,8 @@ func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	e.mu.Lock()
 	if err == nil {
 		c.tools, c.good, c.at = tools, true, time.Now()
+		c.session = ent
+		c.instructions = ent.session.InitializeResult().Instructions
 		if c.revision != revision {
 			c.at = time.Time{}
 		}
@@ -187,18 +249,19 @@ func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	e.mu.Unlock()
 }
 
-// listTools follows cursors while retaining the raw wire shape and annotations.
+// listTools follows bounded cursors, retaining raw stdio and SDK-supported HTTP fields.
 func listTools(ctx context.Context, session *mcp.ClientSession) ([]wire.Object, error) {
 	tools := []wire.Object{}
 	cursor := ""
 	seen := map[string]bool{}
-	for {
+	names := map[string]bool{}
+	totalBytes := 0
+	for pageNumber := 0; pageNumber < 100; pageNumber++ {
 		cctx, raw := wire.Capture(ctx)
 		result, err := session.ListTools(cctx, &mcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
 			return nil, err
 		}
-		// The SDK may serve a typed cached page for newer negotiated protocols.
 		if len(*raw) == 0 {
 			b, err := wire.JSON(result, false)
 			if err != nil {
@@ -206,7 +269,11 @@ func listTools(ctx context.Context, session *mcp.ClientSession) ([]wire.Object, 
 			}
 			*raw = b
 		}
-		v, err := wire.Decode(*raw)
+		totalBytes += len(*raw)
+		if totalBytes > maxCatalogBytes {
+			return nil, fmt.Errorf("tools/list exceeds the 16 MiB catalog limit")
+		}
+		v, err := wire.DecodeExact(*raw)
 		if err != nil {
 			return nil, err
 		}
@@ -223,6 +290,11 @@ func listTools(ctx context.Context, session *mcp.ClientSession) ([]wire.Object, 
 			if !ok {
 				return nil, fmt.Errorf("invalid tool definition")
 			}
+			name, _ := tool.Get("name").(string)
+			if name == "" || names[name] {
+				return nil, fmt.Errorf("tools/list contains an empty or duplicate tool name")
+			}
+			names[name] = true
 			if schema, ok := tool.Get("inputSchema").(wire.Object); ok {
 				tool.Set("inputSchema", ordered(schema, "type", "properties", "required"))
 			}
@@ -246,12 +318,13 @@ func listTools(ctx context.Context, session *mcp.ClientSession) ([]wire.Object, 
 		}
 		seen[cursor] = true
 	}
+	return nil, fmt.Errorf("tools/list exceeded 100 pages")
 }
 
-// reap closes idle, unused sessions while keeping their catalogs.
+// reap closes idle unused sessions, preserving their catalogs and active operations.
 func (e *Engine) reap() {
 	defer e.workers.Done()
-	interval := e.idleTTL / 2
+	interval := min(e.idleTTL/2, 100*time.Millisecond)
 	if interval < 10*time.Millisecond {
 		interval = 10 * time.Millisecond
 	}
@@ -274,7 +347,7 @@ func (e *Engine) reapIdle(now time.Time) {
 	for name, ent := range e.entries {
 		select {
 		case <-ent.ready:
-			if ent.err == nil && ent.users == 0 && now.Sub(ent.lastUsed) >= e.idleTTL {
+			if ent.err == nil && ent.users == 0 && now.Sub(ent.lastUsed) >= ent.idle {
 				delete(e.entries, name)
 				e.closeEntry(ent)
 			}
@@ -286,6 +359,9 @@ func (e *Engine) reapIdle(now time.Time) {
 // loadIndex accepts only an owner-only regular file and matching definitions.
 // Persisted tools are stale so the first lookup revalidates in the background.
 func (e *Engine) loadIndex() {
+	if os.Getenv("TAP_CACHE_DIR") == "off" {
+		return
+	}
 	path := e.Path + ".tools.json"
 	st, err := os.Lstat(path)
 	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
@@ -297,19 +373,19 @@ func (e *Engine) loadIndex() {
 	}
 	defer f.Close()
 	opened, err := f.Stat()
-	if err != nil || !os.SameFile(st, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm()&0077 != 0 {
+	if err != nil || !os.SameFile(st, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm()&0077 != 0 || opened.Size() > maxCatalogBytes {
 		return
 	}
-	b, err := io.ReadAll(io.LimitReader(f, 16<<20))
-	if err != nil {
+	b, err := io.ReadAll(io.LimitReader(f, maxCatalogBytes+1))
+	if err != nil || len(b) > maxCatalogBytes {
 		return
 	}
-	v, err := wire.Decode(b)
+	v, err := wire.DecodeExact(b)
 	if err != nil {
 		return
 	}
 	index, ok := v.(wire.Object)
-	if !ok || index.Get("version") != float64(1) {
+	if !ok || wire.String(index.Get("version")) != "1" {
 		return
 	}
 	rows, _ := index.Get("servers").(wire.Object)
@@ -332,13 +408,13 @@ func (e *Engine) loadIndex() {
 			tools = append(tools, tool)
 		}
 		if tools != nil {
-			e.catalogs[f.Name] = &catalog{fingerprint: e.definitions[f.Name], tools: tools, good: true}
+			instructions, _ := row.Get("instructions").(string)
+			e.catalogs[f.Name] = &catalog{fingerprint: e.definitions[f.Name], tools: tools, good: true, instructions: instructions}
 		}
 	}
 }
 
-// persistIndex coalesces successful refreshes; Close ends it after refresh workers
-// finish so the final queued write includes every successful catalog.
+// persistIndex coalesces successful refreshes; Close flushes the final queued write.
 func (e *Engine) persistIndex() {
 	defer close(e.indexDone)
 	for range e.indexDirty {
@@ -360,9 +436,12 @@ func (e *Engine) persistIndex() {
 	}
 }
 
-// saveIndex atomically replaces the index with mode 0600, never following its symlink.
-// Only fingerprints and tool descriptors are stored, never connection definitions.
+// saveIndex atomically replaces the owner-only index without following its symlink.
+// Only fingerprints and descriptors/guidance are stored, never connection definitions.
 func (e *Engine) saveIndex() {
+	if os.Getenv("TAP_CACHE_DIR") == "off" {
+		return
+	}
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
 	e.mu.Lock()
@@ -373,15 +452,14 @@ func (e *Engine) saveIndex() {
 			for i, t := range c.tools {
 				tools[i] = t
 			}
-			rows.Set(name, wire.Object{{Name: "fingerprint", Value: c.fingerprint}, {Name: "tools", Value: tools}})
+			rows.Set(name, wire.Object{{Name: "fingerprint", Value: c.fingerprint}, {Name: "tools", Value: tools}, {Name: "instructions", Value: c.instructions}})
 		}
 	}
 	e.mu.Unlock()
 	b, err := wire.JSON(wire.Object{{Name: "version", Value: 1}, {Name: "servers", Value: rows}}, false)
-	if err != nil {
+	if err != nil || len(b) > maxCatalogBytes {
 		return
 	}
-	// The config directory already exists; persistence is optional if it is unwritable.
 	path := e.Path + ".tools.json"
 	f, err := os.CreateTemp(filepath.Dir(path), ".tap-tools-*")
 	if err != nil {

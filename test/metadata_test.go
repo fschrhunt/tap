@@ -14,7 +14,7 @@ func TestSearchOutputSchema(t *testing.T) {
 	h := start(t, map[string]any{"fixture": definition("--output-schema")})
 	h.initialize()
 	r := h.search(map[string]any{"query": "data"})
-	equal(t, r["matches"].([]any)[0].(map[string]any)["outputSchema"], map[string]any{"type": "object"})
+	equal(t, r["matches"].([]any)[0].(map[string]any)["outputSchema"], map[string]any{"type": "object", "properties": map[string]any{"count": map[string]any{"type": "integer"}}})
 }
 
 // TestResultIdentityBelongsToTap rejects connector identity metadata while preserving application data.

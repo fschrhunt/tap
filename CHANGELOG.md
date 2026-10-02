@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Agent-oriented discovery while retaining two MCP tools: provider-scoped BM25 ranking, Unicode
+  tokenization, conservative typo recovery, server browsing, exact inspection, paging and adaptive
+  schema disclosure. Full schemas are never truncated; output schemas and untrusted server guidance
+  are exposed when available. Initialization gives a bounded integration-name overview.
+- Persistent, credential/config/environment-scoped metadata caching with explicit freshness and
+  unverified cached availability. Live catalog refresh, pagination and tool-list-change invalidation;
+  config changes retire old sessions. Per-server stdio idle timeout overrides never stop active operations.
+- Complete local input-schema validation before calling, precise value-free diagnostics and
+  structured recovery errors. User-configured tool allow/deny rules fail closed. No automatic call
+  retries or argument coercion; post-send protocol failures report unknown execution outcome.
+- Opt-in result references (raw/lossless stdio, SDK-supported HTTP fields) with bounded session memory, JSON Pointer inspection,
+  deterministic paging, release and explicit argument copies. Cross-server copies require source
+  policy grants. References are bound to actual MCP sessions, including authenticated remote relays.
+  Results too large to retain stay inline without changing the execution outcome.
+- CLI scoped search, full inspection, metadata refresh and policy/idle flags. Offline retrieval
+  benchmark compares original search and recorded competitor rankings; measured-run evaluation
+  reports verified task outcomes, real token usage, cost per success and latency under matched
+  task/trial/environment/budget/model settings. Development scores are not independent leaderboard
+  claims. Black-box tests cover cache scope, notifications, concurrency, policy and references.
 - `tap remote serve` hosts shared connectors over authenticated HTTP or native TLS;
   `tap remote use` selects a lazy stdio relay without changing harness configurations.
   Server additions are discovered by existing agents on their next search. Optional

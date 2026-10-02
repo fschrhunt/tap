@@ -31,6 +31,10 @@ tap add db --env DATABASE_URL='${DATABASE_URL}' --cwd ~/code/app -- node mcp/ser
 | `--bearer-token-env NAME` | Send `Authorization: Bearer $NAME`, read from tap's environment. |
 | `--env K=V` | An environment variable for a stdio server. Repeat for more. |
 | `--cwd DIR` | The directory a stdio server starts in. |
+| `--allow-tool GLOB` | Only these tool names may be discovered/called; repeat to allow more. |
+| `--deny-tool GLOB` | Block these tool names; deny wins over allow. Repeatable. |
+| `--reference-to SERVER` | Permit retained values from this server to flow to that destination. Repeatable. |
+| `--idle-timeout-ms N` | Override the default idle timeout for stdio (1–86400000 ms); backend state is lost. |
 
 Server names cannot contain dots, since tools are named `server.tool`.
 
@@ -81,3 +85,44 @@ docs — unavailable: fetch failed
 - HTTP redirects are rejected: configure the final MCP endpoint so static
   authentication headers cannot be forwarded to another destination.
 - If `servers.json` is a symlink, `tap add` and `tap remove` write through it to the real file.
+
+## Tool policy and retained-data transfer
+
+All tools remain allowed by default for compatibility. To restrict a server:
+
+```sh
+tap add issues https://issues.example.com/mcp --allow-tool 'get_*' --allow-tool 'list_*' --deny-tool '*delete*'
+tap add db --reference-to crm -- node db-server.mjs
+```
+
+The equivalent server entry can contain:
+
+```json
+{
+  "command":["node","db-server.mjs"],
+  "policy":{
+    "allow":["query","list_*"],
+    "deny":["delete_*"],
+    "referenceTo":["crm"]
+  }
+}
+```
+
+Patterns use Go path globs against the **tool name**, without a server prefix: `*`, `?` and
+character classes are supported. An absent `allow` means unrestricted; `"allow": []` allows
+nothing. Deny always wins. Invalid policy fields, values and patterns fail closed. A denied call
+does not start a backend. Discovery omits denied tools; upstream catalog counts are not filtered.
+
+`referenceTo` contains exact destination **server** names, not globs. Its absence blocks cross-server
+reference copies; same-server copies are permitted. This rule does not prevent an agent from
+reading inline data and passing it manually to another tool. It is not a complete data-loss
+prevention system. Policy files must be controlled by a trusted operator; an agent with shell/file
+access as your user may also be able to edit them. Tap does not implement a trusted approval UI.
+
+Because calls all route through `plugin_call`, native host permissions for original MCP tool
+names may no longer apply. Configure tap policy and host restrictions explicitly. Server
+`readOnlyHint` / `destructiveHint` annotations inform the agent but never grant authorization.
+
+`idleTimeoutMs` is an optional stdio-only override of the default five-minute timeout
+(`TAP_IDLE_TTL_MS`). Use a suitably long timeout for a browser, transaction or other stateful
+backend unless losing its process-local state is acceptable.
