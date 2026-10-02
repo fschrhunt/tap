@@ -462,3 +462,13 @@ func TestSafeCatalogKeepsSignInInstruction(t *testing.T) {
 		}
 	}
 }
+
+// TestNewNamesMissingToken pins what a client told to relay sees when its token variable is
+// unset: the error must name the variable, so the fix is obvious without reading the config.
+func TestNewNamesMissingToken(t *testing.T) {
+	t.Setenv("TAP_TEST_MISSING_TOKEN", "")
+	_, err := New(config.Remote{URL: "http://example.invalid/mcp", TokenEnv: "TAP_TEST_MISSING_TOKEN", AllowInsecure: true}, "test")
+	if err == nil || !strings.Contains(err.Error(), "TAP_TEST_MISSING_TOKEN") {
+		t.Fatalf("New with an unset token: %v, want an error naming TAP_TEST_MISSING_TOKEN", err)
+	}
+}

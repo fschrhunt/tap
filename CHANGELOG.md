@@ -1,5 +1,10 @@
 # tap releases
 
+## Unreleased
+
+- A command run without the remote's token variable now names it: `tap: remote
+  token environment variable TAP_REMOTE_TOKEN is not set`.
+
 ## v1.0.1 · 2026-10-02
 
 - Through a remote, a server that needs a sign-in says so instead of the generic

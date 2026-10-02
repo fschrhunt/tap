@@ -44,6 +44,11 @@ Non-loopback plaintext listeners require explicit `--allow-insecure`. Clients
 likewise require explicit consent for non-loopback HTTP. This is only for trusted
 networks or private proxy backends: bearer tokens and tool data travel in plaintext.
 
+The serving machine itself doesn't select the remote: it already reads its
+connectors locally, and an address bound to a LAN or VPN interface may not be
+reachable from the host that binds it. Leave the serving machine on its local
+registry.
+
 ## Select it on each client
 
 Give the local tap process the token through its environment, including the
