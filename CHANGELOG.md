@@ -39,7 +39,7 @@
   is not decoded, or saved, again; over stdio the SDK no longer decodes tool lists a second
   time. An unchanged, settled config file is not read again on every search and call. With five
   servers and 213 real tools, a cold tap is ready in 3.3 ms and returns a first tool result in
-  7.4 ms, where the build before this work took 18.9 ms, and its memory high-water mark is
+  7.5 ms, where the build before this work took 18.4 ms, and its memory high-water mark is
   17 MiB, down from 25 MiB: medians of 30 local Linux/amd64 runs.
 - Agent-oriented discovery while retaining two MCP tools: provider-scoped BM25 ranking, Unicode
   tokenization, conservative typo recovery, server browsing, exact inspection, paging and adaptive
