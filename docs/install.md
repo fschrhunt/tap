@@ -2,6 +2,30 @@
 
 tap is a single binary. It needs no Node runtime. Downstream servers may need their own runtimes.
 
+## Install with the script
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh
+```
+
+It downloads the release for this computer, checks it against the release's `checksums.txt`,
+and installs into `~/.local/bin`. Run it again to update. It takes `--version vX.Y.Z` to install
+one release and `--dir DIR` for another folder; `$TAP_RELEASES` replaces the releases address,
+for testing.
+
+## Install with Homebrew
+
+tap's repository is its own tap:
+
+```sh
+brew tap fschrhunt/tap https://github.com/fschrhunt/tap
+brew install fschrhunt/tap/tap
+```
+
+Update with `brew upgrade fschrhunt/tap/tap`.
+
+## Install from Releases
+
 Download the `linux` or `darwin` archive for `amd64` or `arm64` from
 [Releases](https://github.com/fschrhunt/tap/releases). Extract it, verify its archive against
 `checksums.txt`, and install the binary:
@@ -39,7 +63,9 @@ built with `-ldflags "-X main.version=VERSION"`.
 
 ## Update
 
-Replace the binary with a newer release, or repeat `go install` above. For a source checkout:
+Run the install script again to move to the latest release, or replace the binary with a newer
+release from [Releases](https://github.com/fschrhunt/tap/releases), or repeat `go install` above.
+For a source checkout:
 
 ```sh
 git pull
