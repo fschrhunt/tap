@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- `tap auth NAME` signs in to an MCP server through your browser, and tap renews the sign-in
+  by itself. It follows the MCP authorization spec, OAuth with the SDK's client: discovery,
+  client registration, PKCE. `--no-browser` and a pasted address cover machines
+  reached over SSH; `--client-id` covers providers that do not register clients. Sign-ins are
+  kept in an owner-only file beside the config. A server waiting for one says so in `tap list`
+  and in searches: `needs you to sign in: run "tap auth NAME"`.
+- `tap import` adds the servers that Claude Code, Codex, OpenCode, Cursor and VS Code already
+  have, or those in any config file you name. `--dry-run` shows what it would do. It only
+  reads the agents' files.
+- A command line for people. Run in a terminal with no arguments, `tap` prints a short
+  introduction instead of waiting silently. `-h` and `--help` work on every command and never
+  run it; help leads with examples. Unknown commands and flags are errors that name the
+  nearest real one, where they used to be ignored or searched for. Errors say what to do next,
+  and reasons a server is unavailable are written for a person.
+- **Changed:** a command called wrongly now exits 2 and prints its usage. `tap call` exits 1
+  when the tool reports an error, and `tap remove` when there is no such server; both used to
+  exit 0. `tap search` needs a query, and `--limit` a whole number of at least 1. `tap add`
+  refuses an address that is not http or https, and says `replaced` when the name existed.
+  `tap list` and `tap search` wait for each server to answer afresh instead of printing a saved
+  catalog marked stale. Text output is aligned in columns; use `--json` in scripts.
+- Faster first answers. A search from a new process reads the saved tool index without
+  decoding every schema, JSON is read in one pass, and query words are split without regular
+  expressions. A tap that serves an agent answers from the saved index first and revalidates
+  it a quarter second later. An unchanged, settled config file is not read again on every
+  search and call. With
+  five servers and 213 tools, a first tool result from a cold start took 6.9 ms, down from
+  10.0 ms, and a later call adds 0.19 ms, down from 0.30 ms: medians of 30 local Linux/amd64
+  runs. Search results are byte-for-byte the same.
 - `tap remote serve` hosts shared connectors over authenticated HTTP or native TLS;
   `tap remote use` selects a lazy stdio relay without changing harness configurations.
   Server additions are discovered by existing agents on their next search. Optional

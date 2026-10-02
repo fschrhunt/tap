@@ -10,6 +10,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Field is one named value in an Object.
@@ -110,8 +111,278 @@ func JSON(value any, pretty bool) ([]byte, error) {
 	return []byte(s), nil
 }
 
-// Decode parses JSON while retaining object property order.
+// Decode parses JSON while retaining object property order. Well-formed JSON is read in one
+// pass; anything that pass is not sure of, malformed input included, is read by encoding/json
+// instead, so values and errors are the ones encoding/json gives.
 func Decode(data []byte) (any, error) {
+	p := parser{data: data, shallow: math.MaxInt}
+	if v, ok := p.value(0); ok {
+		p.space()
+		if p.at == len(data) {
+			return v, nil
+		}
+	}
+	return decodeTokens(data)
+}
+
+// DecodeShallow parses like Decode, but leaves every object and array nested deeper than
+// depth as a json.RawMessage of its own text: checked to be well-formed, and not decoded. The
+// raw values share data's memory. It reports an error where Decode would ask encoding/json.
+func DecodeShallow(data []byte, depth int) (any, error) {
+	p := parser{data: data, shallow: depth}
+	if v, ok := p.value(0); ok {
+		p.space()
+		if p.at == len(data) {
+			return v, nil
+		}
+	}
+	return nil, fmt.Errorf("JSON this pass does not read")
+}
+
+// parser reads JSON from a byte slice without a token stream. A method reports false when it
+// meets input it will not vouch for, and the caller abandons the pass. Objects and arrays
+// nested deeper than shallow are skipped and returned as their text.
+type parser struct {
+	data    []byte
+	at      int
+	shallow int
+}
+
+// space skips JSON whitespace.
+func (p *parser) space() {
+	for p.at < len(p.data) {
+		switch p.data[p.at] {
+		case ' ', '\n', '\t', '\r':
+			p.at++
+		default:
+			return
+		}
+	}
+}
+
+// next skips whitespace and reports the byte it stops at, or zero at the end.
+func (p *parser) next() byte {
+	p.space()
+	if p.at < len(p.data) {
+		return p.data[p.at]
+	}
+	return 0
+}
+
+// value reads one value. Nesting deeper than encoding/json's limit is left to it to refuse.
+func (p *parser) value(depth int) (any, bool) {
+	if depth > 1000 {
+		return nil, false
+	}
+	switch c := p.next(); {
+	case depth > p.shallow && (c == '{' || c == '['):
+		start := p.at
+		if !p.skip(depth) {
+			return nil, false
+		}
+		return json.RawMessage(p.data[start:p.at]), true
+	case c == '{':
+		p.at++
+		o := Object{}
+		if p.next() == '}' {
+			p.at++
+			return o, true
+		}
+		for {
+			if p.next() != '"' {
+				return nil, false
+			}
+			k, ok := p.text()
+			if !ok || p.next() != ':' {
+				return nil, false
+			}
+			p.at++
+			v, ok := p.value(depth + 1)
+			if !ok {
+				return nil, false
+			}
+			o.Set(k, v)
+			switch p.next() {
+			case ',':
+				p.at++
+			case '}':
+				p.at++
+				return o, true
+			default:
+				return nil, false
+			}
+		}
+	case c == '[':
+		p.at++
+		a := []any{}
+		if p.next() == ']' {
+			p.at++
+			return a, true
+		}
+		for {
+			v, ok := p.value(depth + 1)
+			if !ok {
+				return nil, false
+			}
+			a = append(a, v)
+			switch p.next() {
+			case ',':
+				p.at++
+			case ']':
+				p.at++
+				return a, true
+			default:
+				return nil, false
+			}
+		}
+	case c == '"':
+		return p.text()
+	case c == '-' || c >= '0' && c <= '9':
+		return p.number()
+	case p.word("true"):
+		return true, true
+	case p.word("false"):
+		return false, true
+	case p.word("null"):
+		return nil, true
+	}
+	return nil, false
+}
+
+// skip passes over one value, checking it as value does without building it. A string with
+// an escape is checked by encoding/json.
+func (p *parser) skip(depth int) bool {
+	if depth > 1000 {
+		return false
+	}
+	switch c := p.next(); {
+	case c == '{' || c == '[':
+		end := c + 2
+		p.at++
+		if p.next() == end {
+			p.at++
+			return true
+		}
+		for {
+			if c == '{' {
+				if p.next() != '"' {
+					return false
+				}
+				if _, ok := p.span(); !ok || p.next() != ':' {
+					return false
+				}
+				p.at++
+			}
+			if !p.skip(depth + 1) {
+				return false
+			}
+			switch p.next() {
+			case ',':
+				p.at++
+			case end:
+				p.at++
+				return true
+			default:
+				return false
+			}
+		}
+	case c == '"':
+		_, ok := p.span()
+		return ok
+	case c == '-' || c >= '0' && c <= '9':
+		_, ok := p.number()
+		return ok
+	}
+	return p.word("true") || p.word("false") || p.word("null")
+}
+
+// span passes over a string that starts at the opening quote and reports whether it holds
+// an escape. One with a control character, invalid UTF-8 or a bad escape is not vouched for.
+func (p *parser) span() (escaped, ok bool) {
+	start := p.at + 1
+	for i := start; i < len(p.data); i++ {
+		switch c := p.data[i]; {
+		case c == '\\':
+			escaped = true
+			i++
+		case c < ' ':
+			return escaped, false
+		case c == '"':
+			p.at = i + 1
+			if escaped {
+				return true, json.Valid(p.data[start-1 : i+1])
+			}
+			return false, utf8.Valid(p.data[start:i])
+		}
+	}
+	return escaped, false
+}
+
+// word consumes a literal when the input continues with it.
+func (p *parser) word(literal string) bool {
+	if !bytes.HasPrefix(p.data[p.at:], []byte(literal)) {
+		return false
+	}
+	p.at += len(literal)
+	return true
+}
+
+// text reads a string that starts at the opening quote. One with escapes is unquoted by
+// encoding/json.
+func (p *parser) text() (string, bool) {
+	start := p.at + 1
+	escaped, ok := p.span()
+	if !ok {
+		return "", false
+	}
+	if escaped {
+		var s string
+		err := json.Unmarshal(p.data[start-1:p.at], &s)
+		return s, err == nil
+	}
+	return string(p.data[start : p.at-1]), true
+}
+
+// number reads a number in JSON's grammar as a float64, as encoding/json does.
+func (p *parser) number() (any, bool) {
+	start := p.at
+	digits := func() bool {
+		from := p.at
+		for p.at < len(p.data) && p.data[p.at] >= '0' && p.data[p.at] <= '9' {
+			p.at++
+		}
+		return p.at > from
+	}
+	if p.data[p.at] == '-' {
+		p.at++
+	}
+	if p.at < len(p.data) && p.data[p.at] == '0' {
+		p.at++
+	} else if !digits() {
+		return nil, false
+	}
+	if p.at < len(p.data) && p.data[p.at] == '.' {
+		p.at++
+		if !digits() {
+			return nil, false
+		}
+	}
+	if p.at < len(p.data) && (p.data[p.at] == 'e' || p.data[p.at] == 'E') {
+		p.at++
+		if p.at < len(p.data) && (p.data[p.at] == '+' || p.data[p.at] == '-') {
+			p.at++
+		}
+		if !digits() {
+			return nil, false
+		}
+	}
+	n, err := strconv.ParseFloat(string(p.data[start:p.at]), 64)
+	return n, err == nil
+}
+
+// decodeTokens parses JSON through encoding/json's token stream. It is the reference for
+// Decode: slower, and the source of every error Decode reports.
+func decodeTokens(data []byte) (any, error) {
 	d := json.NewDecoder(bytes.NewReader(data))
 	v, err := decode(d)
 	if err != nil {
@@ -200,8 +471,12 @@ func String(v any) string {
 	}
 }
 
-// arrayIndex recognizes the integer property keys that JavaScript sorts first.
+// arrayIndex recognizes the integer property keys that JavaScript sorts first. A key that
+// does not start with a digit is refused before it is parsed, since nearly every key is one.
 func arrayIndex(name string) (uint64, bool) {
+	if name == "" || name[0] < '0' || name[0] > '9' {
+		return 0, false
+	}
 	n, err := strconv.ParseUint(name, 10, 32)
 	return n, err == nil && n < 4294967295 && strconv.FormatUint(n, 10) == name
 }

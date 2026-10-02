@@ -13,12 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
 	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -28,24 +29,30 @@ import (
 // Engine holds resident sessions and caches for one fixed config path and version.
 type Engine struct {
 	Path, Version string
-	deadline      time.Duration
-	deadlineMS    float64
-	mu            sync.Mutex
-	entries       map[string]*entry
-	ctx           context.Context
-	cancel        context.CancelFunc
-	closeOnce     sync.Once
-	snapshotMu    sync.Mutex
-	indexMu       sync.Mutex
-	indexDirty    chan struct{}
-	indexDone     chan struct{}
-	definitions   map[string]string
-	catalogs      map[string]*catalog
-	indexLoaded   bool
-	slots         chan struct{}
-	failTTL       time.Duration
-	idleTTL       time.Duration
-	workers       sync.WaitGroup
+	// Grace is how long the revalidation of a catalog restored from the index waits. Those
+	// tools already answer the search that asked for them, so a tap that serves an agent
+	// sets it, and starting the servers follows that answer instead of competing with it. A
+	// command, which waits for the fresh list, leaves it at zero.
+	Grace       time.Duration
+	deadline    time.Duration
+	deadlineMS  float64
+	mu          sync.Mutex
+	entries     map[string]*entry
+	ctx         context.Context
+	cancel      context.CancelFunc
+	closeOnce   sync.Once
+	snapshotMu  sync.Mutex
+	last        *configSnapshot
+	indexMu     sync.Mutex
+	indexDirty  chan struct{}
+	indexDone   chan struct{}
+	definitions map[string]string
+	catalogs    map[string]*catalog
+	indexLoaded bool
+	slots       chan struct{}
+	failTTL     time.Duration
+	idleTTL     time.Duration
+	workers     sync.WaitGroup
 }
 
 // entry is one connection generation; ready publishes session and err.
@@ -83,6 +90,10 @@ func New(path, version string) *Engine {
 
 // Message formats SDK errors without exposing credential-bearing endpoint URLs.
 func Message(err error) string {
+	var signIn *auth.Required
+	if errors.As(err, &signIn) {
+		return signIn.Error()
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, mcp.ErrConnectionClosed) {
 		return "Connection closed"
 	}
@@ -177,7 +188,7 @@ func (e *Engine) open(name string, def wire.Object, quiet bool, ent *entry) {
 		ent.openedAt = time.Now()
 		ctx, cancel := context.WithTimeout(e.ctx, e.deadline)
 		defer cancel()
-		transport, terr := transportFor(name, def, quiet)
+		transport, terr := transportFor(e.Path, name, def, quiet)
 		err = terr
 		if err == nil {
 			client := mcp.NewClient(&mcp.Implementation{Name: "tap", Version: e.Version}, &mcp.ClientOptions{
@@ -245,8 +256,10 @@ func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-// transportFor chooses the SDK transport and configures the child environment.
-func transportFor(name string, def wire.Object, quiet bool) (mcp.Transport, error) {
+// transportFor chooses the SDK transport and configures the child environment. An HTTP server
+// with no credential of its own configured is lent the sign-in saved for it beside the config
+// at path, if there is one.
+func transportFor(path, name string, def wire.Object, quiet bool) (mcp.Transport, error) {
 	typ, _ := def.Get("type").(string)
 	endpoint, _ := def.Get("url").(string)
 	if typ == "" {
@@ -319,14 +332,18 @@ func transportFor(name string, def wire.Object, quiet bool) (mcp.Transport, erro
 	if token, ok := def.Get("bearerTokenEnv").(string); ok && os.Getenv(token) != "" {
 		headers.Set("Authorization", "Bearer "+os.Getenv(token))
 	}
-	return &mcp.StreamableClientTransport{
+	transport := &mcp.StreamableClientTransport{
 		Endpoint: endpoint,
 		HTTPClient: &http.Client{
 			Transport:     headerTransport{headers},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		MaxRetries: -1,
-	}, nil
+	}
+	if headers.Get("Authorization") == "" {
+		transport.OAuthHandler = auth.Handler(path, name, endpoint)
+	}
+	return transport, nil
 }
 
 type serverTools struct {
@@ -389,18 +406,32 @@ func (e *Engine) Listing(ctx context.Context, quiet bool) (wire.Object, error) {
 	return wire.Object{{Name: "config", Value: e.Path}, {Name: "integrations", Value: integrations}}, nil
 }
 
-var camel = regexp.MustCompile(`([a-z0-9])([A-Z])`)
-var punctuation = regexp.MustCompile(`[^a-z0-9]+`)
-
-// tokenize makes camelCase, underscores and punctuation comparable for scoring.
+// tokenize makes camelCase, underscores and punctuation comparable for scoring: lowercase
+// runs of ASCII letters and digits, with a break where a capital follows a lowercase letter
+// or a digit.
 func tokenize(s string) []string {
-	s = strings.ToLower(camel.ReplaceAllString(s, "$1 $2"))
 	out := []string{}
-	for _, t := range punctuation.Split(s, -1) {
-		if t != "" {
-			out = append(out, t)
+	var word []byte
+	flush := func() {
+		if len(word) > 0 {
+			out = append(out, string(word))
+			word = word[:0]
 		}
 	}
+	alnum := func(r rune) bool { return r >= 'a' && r <= 'z' || r >= '0' && r <= '9' }
+	var prev rune
+	for _, r := range s {
+		if alnum(prev) && r >= 'A' && r <= 'Z' {
+			flush()
+		}
+		if lower := unicode.ToLower(r); alnum(lower) {
+			word = append(word, byte(lower))
+		} else {
+			flush()
+		}
+		prev = r
+	}
+	flush()
 	return out
 }
 

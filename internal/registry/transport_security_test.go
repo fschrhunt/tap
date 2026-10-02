@@ -26,7 +26,7 @@ func TestHTTPRedirectDoesNotForwardCredentials(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
 	}))
 	defer source.Close()
-	transport, err := transportFor("redirect", wire.Object{
+	transport, err := transportFor("", "redirect", wire.Object{
 		{Name: "url", Value: source.URL},
 		{Name: "headers", Value: wire.Object{{Name: "X-Api-Key", Value: "synthetic-test-secret"}}},
 	}, true)

@@ -39,8 +39,11 @@ schema only when it needs that tool.
   that expose no tools.
   Stale catalog rows and matches carry `stale: true`; a failed refresh is also reported as
   an error/unavailable server without discarding those matches. Fresh memory catalogs last
-  one minute. Restored disk catalogs are always revalidated in the background.
-- **Changes.** Additions are discovered on the next search. Changed or removed server definitions
+  one minute. Restored disk catalogs answer the search that asked for them, and are always
+  revalidated in the background a quarter second later.
+- **Changes.** Additions are discovered on the next search. tap reads the config again
+  whenever the file's size or modification time has changed, or was modified in the last two
+  seconds. Changed or removed server definitions
   invalidate their sessions and cached tools; a removed server cannot still be called through
   an old resident connection.
 - **Resources.** Cold discovery is bounded rather than starting every connector at once. Idle

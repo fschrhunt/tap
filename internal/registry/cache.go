@@ -22,6 +22,7 @@ type catalog struct {
 	tools       []wire.Object
 	at, retryAt time.Time
 	good        bool
+	restored    bool
 	refreshing  chan struct{}
 	err         error
 	revision    uint64
@@ -48,16 +49,30 @@ func definitionFingerprint(def any) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(config.Expand(string(b))+"\x00"+token+"\x00"+os.Getenv("HOME")+"\x00"+os.Getenv("PATH"))))
 }
 
-// configSnapshot keeps definitions and their fingerprints together through fanout.
+// configSnapshot keeps definitions and their fingerprints together through fanout, with the
+// state of the file they were read from.
 type configSnapshot struct {
 	servers      wire.Object
 	fingerprints map[string]string
+	file         os.FileInfo
 }
 
-// snapshot reads once per operation and invalidates changed or removed generations.
+// settled is how old a config file's modification time must be before an unchanged time and
+// size are taken to mean unchanged content. It is longer than the coarsest timestamps a
+// filesystem keeps, so an edit made within one tick of the last read is never missed.
+const settled = 2 * time.Second
+
+// snapshot runs once per operation and invalidates changed or removed generations. It reads
+// the config again unless the file is the one it last read, unchanged and settled.
 func (e *Engine) snapshot() (*configSnapshot, error) {
 	e.snapshotMu.Lock()
 	defer e.snapshotMu.Unlock()
+	file, statErr := os.Stat(e.Path)
+	if last := e.last; last != nil && statErr == nil && last.file != nil && os.SameFile(file, last.file) &&
+		file.Size() == last.file.Size() && file.ModTime().Equal(last.file.ModTime()) && time.Since(file.ModTime()) > settled {
+		return last, nil
+	}
+	e.last = nil
 	servers, err := config.Load(e.Path)
 	if err != nil {
 		return nil, err
@@ -84,7 +99,11 @@ func (e *Engine) snapshot() (*configSnapshot, error) {
 		e.indexLoaded = true
 		e.loadIndex()
 	}
-	return &configSnapshot{servers: servers, fingerprints: definitions}, nil
+	if statErr != nil {
+		file = nil
+	}
+	e.last = &configSnapshot{servers: servers, fingerprints: definitions, file: file}
+	return e.last, nil
 }
 
 // toolsFor returns tools, their stale status, and the last refresh error together.
@@ -144,7 +163,15 @@ func (e *Engine) refresh(name string, def wire.Object, quiet bool, c *catalog) {
 	defer e.workers.Done()
 	e.mu.Lock()
 	revision := c.revision
+	restored := c.restored
+	c.restored = false
 	e.mu.Unlock()
+	if restored && e.Grace > 0 {
+		select {
+		case <-time.After(e.Grace):
+		case <-e.ctx.Done():
+		}
+	}
 	began := time.Now()
 	ent, err := e.connect(e.ctx, name, def, c.fingerprint, quiet)
 	var tools []wire.Object
@@ -284,7 +311,8 @@ func (e *Engine) reapIdle(now time.Time) {
 }
 
 // loadIndex accepts only an owner-only regular file and matching definitions.
-// Persisted tools are stale so the first lookup revalidates in the background.
+// Persisted tools are stale so the first lookup revalidates in the background, after the
+// engine's Grace.
 func (e *Engine) loadIndex() {
 	path := e.Path + ".tools.json"
 	st, err := os.Lstat(path)
@@ -304,7 +332,8 @@ func (e *Engine) loadIndex() {
 	if err != nil {
 		return
 	}
-	v, err := wire.Decode(b)
+	// A tool's schema and annotations stay as text until a search returns that tool.
+	v, err := wire.DecodeShallow(b, 4)
 	if err != nil {
 		return
 	}
@@ -332,7 +361,7 @@ func (e *Engine) loadIndex() {
 			tools = append(tools, tool)
 		}
 		if tools != nil {
-			e.catalogs[f.Name] = &catalog{fingerprint: e.definitions[f.Name], tools: tools, good: true}
+			e.catalogs[f.Name] = &catalog{fingerprint: e.definitions[f.Name], tools: tools, good: true, restored: true}
 		}
 	}
 }

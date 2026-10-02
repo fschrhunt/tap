@@ -16,7 +16,9 @@ or modify a personal server config for tests.
 ## Code map
 
 - `cmd/tap/main.go`: process entry point and the link-time version (`dev` by default).
-- `internal/cli/`: CLI dispatch and output.
+- `internal/cli/`: the command line: dispatch, flags, output, and the help texts in `help.go`.
+- `internal/agents/`: reads the MCP servers in coding agents' configs, for `tap import`.
+- `internal/auth/`: the sign-in for `tap auth`, its owner-only store, and token renewal.
 - `internal/config/`: config reads, atomic writes, and environment/home expansion.
 - `internal/registry/`: lazy downstream connections, deadlines, search, calls, and tool cache.
 - `internal/remote/`: authenticated HTTP hosting, remote administration and lazy client relay.
@@ -24,7 +26,7 @@ or modify a personal server config for tests.
 - `internal/wire/`: ordered JSON and preservation of raw SDK responses.
 - `test/fixture/`: local stdio/HTTP fixture with success, error, structured, noisy and hang modes.
 - `test/*_test.go`: black-box CLI and MCP tests with temporary configs.
-- `test/testdata/`: tool-definition and help snapshots from the original implementation.
+- `test/testdata/`: tool-definition snapshots from the original implementation, and the help text.
 - `docs/`: user docs with examples; update them with any user-visible change.
 - `assets/`: the logo, wordmark and lockup SVGs in black and white; see `assets/README.md`.
 

@@ -646,3 +646,63 @@ func TestFanoutUsesConfigSnapshot(t *testing.T) {
 		t.Fatal("next call did not see config removal")
 	}
 }
+
+// TestSettledConfigIsNotReadAgain pins when a snapshot may be reused: only while the config
+// file is unchanged and its modification time is old enough to trust.
+func TestSettledConfigIsNotReadAgain(t *testing.T) {
+	e := testEngine(t, wire.Object{})
+	first, err := e.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := e.snapshot(); again == first {
+		t.Fatal("a config written a moment ago was not read again")
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(e.Path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	settledOnce, _ := e.snapshot()
+	if again, _ := e.snapshot(); again != settledOnce {
+		t.Fatal("a settled, unchanged config was read again")
+	}
+	if err := os.WriteFile(e.Path, []byte(`{"servers":{"added":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(e.Path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := e.snapshot()
+	if err != nil || !changed.servers.Has("added") {
+		t.Fatalf("a config of another size with the same time was not read again: %v, %v", changed, err)
+	}
+}
+
+// TestTokenize pins the words a query and a tool name are compared by.
+func TestTokenize(t *testing.T) {
+	for input, want := range map[string]string{
+		"getFileInfo":            "get file info",
+		"list_allowed-dirs v2":   "list allowed dirs v2",
+		"HTTPServer2Go API-post": "httpserver2 go api post",
+		"  Créer  ":              "cr er",
+		"":                       "",
+	} {
+		if got := strings.Join(tokenize(input), " "); got != want {
+			t.Errorf("tokenize(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// TestServerThatWantsASignInSaysHowToGiveIt pins what a search reports for an OAuth server
+// tap has no sign-in for.
+func TestServerThatWantsASignInSaysHowToGiveIt(t *testing.T) {
+	guarded := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="http://`+r.Host+`/.well-known/oauth-protected-resource"`)
+		http.Error(w, "sign in first", http.StatusUnauthorized)
+	}))
+	t.Cleanup(guarded.Close)
+	row := listing(t, testEngine(t, definitions(guarded.URL))).Get("integrations").([]any)[0].(wire.Object)
+	if got := wire.String(row.Get("error")); got != `needs you to sign in: run "tap auth test"` {
+		t.Fatalf("error = %q", got)
+	}
+}

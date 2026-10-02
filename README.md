@@ -40,11 +40,15 @@ See [Install](docs/install.md) for details.
 ## Use
 
 ```sh
-tap add docs https://docs.example.com/mcp          # an HTTP server
+tap import                                         # bring over the servers your agents have
+tap add docs https://docs.example.com/mcp          # or add an HTTP server
 tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes
+tap auth linear                                    # sign in to a server
 tap list                                           # servers and tool counts
-tap search "create issue"                          # what your agent would find
+tap search create issue                            # what your agent would find
 ```
+
+`tap --help` lists every command, and `tap COMMAND --help` has examples for each.
 
 ## Docs
 

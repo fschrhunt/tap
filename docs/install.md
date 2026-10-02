@@ -87,10 +87,20 @@ command = "tap"
 }
 ```
 
-Then move your other MCP servers out of the agent's config and into tap's (see
-[Servers](servers.md)). The agent now loads two tools, `plugin_search` and `plugin_call`, however
-many servers you add.
+Then move your other MCP servers out of the agent's config and into tap's: `tap import` copies
+them over, and you delete them from the agent's config (see [Servers](servers.md)). The agent
+now loads two tools, `plugin_search` and `plugin_call`, however many servers you add.
 
 To share connectors across machines, keep these same harness settings and run
 `tap remote use https://tap.example.com:8765` on each machine. See [Remote](remote.md)
 for hosting on an ordinary port, authentication and native TLS. No VPN is required.
+
+## Uninstall
+
+Take tap out of each agent's config, for example `claude mcp remove tap`, and put back any
+servers you still want there. Then delete the binary and tap's files:
+
+```sh
+rm ~/.local/bin/tap      # or ~/go/bin/tap
+rm -r ~/.tap             # servers, saved tool lists and sign-ins
+```
