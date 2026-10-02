@@ -20,7 +20,7 @@ Download the archive for your OS and architecture from
 [Releases](https://github.com/fschrhunt/tap/releases), extract it, and put `tap` on your `PATH`.
 It is one binary; no Node runtime is needed.
 
-With Go 1.25 or newer:
+With Go 1.26 or newer:
 
 ```sh
 go install github.com/fschrhunt/tap/cmd/tap@latest
