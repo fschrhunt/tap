@@ -15,9 +15,9 @@ tap is one MCP server that stands in for all of yours. Your agent loads two tool
 when it needs them.
 
 Search or browse capabilities, inspect complete contracts, and call with validated arguments.
-Fresh metadata can be searched without starting backends, even across sessions. With
-`TAP_REFERENCES=on`, large results can stay behind session-local references rather than filling
-the agent's context.
+Saved tools are searched without starting their servers, even across sessions; a server starts
+when one of its tools is called. With `tap config set references on`, large results can stay
+behind session-local references rather than filling the agent's context.
 
 ## Install
 
@@ -57,8 +57,8 @@ tap search create issue                            # what your agent would find
 
 ## Docs
 
-[Install](docs/install.md) · [Servers](docs/servers.md) · [Command line](docs/cli.md) ·
-[How it works](docs/how-it-works.md) · [Remote](docs/remote.md)
+[Install](docs/install.md) · [Servers](docs/servers.md) · [Command line](docs/cli.md) · [Settings](docs/settings.md) ·
+[Internals](docs/internals.md) · [Remote](docs/remote.md)
 
 [Benchmarks](bench/README.md) explain reproducible retrieval comparisons and measured task-run
 evaluation. No competitor superiority claim is made without matched end-to-end measurements.

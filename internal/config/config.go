@@ -1,5 +1,5 @@
-// Package config reads and atomically edits tap's ordered server registry. It
-// expands environment and home references only when a connection is opened.
+// Package config reads and atomically edits tap's ordered server registry and its settings.
+// It expands environment and home references only when a connection is opened.
 package config
 
 import (
@@ -94,6 +94,9 @@ func loadRoot(path string) (wire.Object, error) {
 		if _, err := remoteFrom(root.Get("remote")); err != nil {
 			return nil, err
 		}
+	}
+	if err := checkSettings(root); err != nil {
+		return nil, err
 	}
 	return root, nil
 }

@@ -34,7 +34,7 @@ and `TAP_CACHE_DIR=off` disables persistence. Configured credentials are used on
 digest, not written as cache metadata. A call is checked against tools read from that cache only
 when the live server has just answered with the tool list whose digest was saved beside them, so
 whoever can write the cache can shape that check: it deserves the protection the config gets.
-Result references are off unless `TAP_REFERENCES=on`; they are bounded, memory-only and process-local.
+Result references are off unless the `references` setting is on; they are bounded, memory-only and process-local.
 Cross-server reference copies require a source-side grant, but inline copying by the agent remains
 possible. Neither this policy nor references constitute a full data-loss prevention system.
 ## Remote deployments

@@ -724,3 +724,54 @@ func TestUnchangedListKeepsCatalog(t *testing.T) {
 		t.Fatalf("a changed list was not taken: %d tools", len(changed))
 	}
 }
+
+// TestStartOnCallLeavesServersAlone pins the default start setting: once tap holds a server's
+// tools, a search answers from them without starting it, and a call starts it and checks them.
+func TestStartOnCallLeavesServersAlone(t *testing.T) {
+	p := newPeer(t, nil)
+	e := testEngine(t, definitions(p.url))
+	listing(t, e)
+	e.Close()
+	connects := p.connects.Load()
+	next := New(e.Path, "test")
+	defer next.Close()
+	found, err := next.Discover(context.Background(), SearchOptions{Query: "echo", Limit: 8}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if match := found.Get("matches").([]any)[0].(wire.Object); match.Get("id") != "test.echo" || match.Get("stale") != true {
+		t.Fatalf("search did not answer from the saved tools: %v", match)
+	}
+	next.mu.Lock()
+	started := next.entries["test"] != nil || next.catalogs["test"].refreshing != nil
+	next.mu.Unlock()
+	if started || p.connects.Load() != connects {
+		t.Fatal("a search started the server")
+	}
+	if _, err := next.CallWithOptions(context.Background(), "test.echo", wire.Object{}, true, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if p.connects.Load() != connects+1 {
+		t.Fatal("the call did not start the server")
+	}
+}
+
+// TestStartWithTapKeepsServerRunning pins the eager start setting: warming up starts the
+// server, and it is not stopped for being unused.
+func TestStartWithTapKeepsServerRunning(t *testing.T) {
+	t.Setenv("TAP_IDLE_TTL_MS", "0")
+	p := newPeer(t, nil)
+	e := testEngine(t, definitions(p.url))
+	if err := config.Set(e.Path, "test", "start", config.StartWithTap); err != nil {
+		t.Fatal(err)
+	}
+	e.Warm()
+	waitFor(t, func() bool { e.mu.Lock(); defer e.mu.Unlock(); return e.running("test") })
+	time.Sleep(50 * time.Millisecond)
+	e.mu.Lock()
+	running := e.running("test")
+	e.mu.Unlock()
+	if !running || p.connects.Load() != 1 {
+		t.Fatalf("running %v after %d connections", running, p.connects.Load())
+	}
+}

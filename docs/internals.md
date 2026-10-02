@@ -1,4 +1,4 @@
-# How it works
+# Internals
 
 tap exposes two MCP tools, with no model or embedding service inside the gateway. Local
 initialization includes a bounded integration-name overview without starting downstream servers.
@@ -40,15 +40,18 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
 ## Connections and metadata
 
 - **Lazy startup:** initialization and tools/list open no downstream connections. While it
-  answers them, a serving tap reads its saved index, so the first search does not wait for it;
-  that starts no server. Scoped discovery
+  answers them, a serving tap reads its saved index, so the first search does not wait for it,
+  and starts only servers whose [start setting](settings.md#when-servers-start) is `start`.
+  By default (`call`) a search answers from saved tools without starting their servers; a
+  server tap has never listed is started once to list it. With `search`, scoped discovery
   contacts no unrelated providers. Unscoped cold discovery contacts all selected providers, with
   at most eight simultaneous connection/discovery operations. Calls open only their target.
 - **Budgets/backoff:** connection and paginated listing share a per-server deadline. Failed servers
   back off rather than blocking every subsequent search. Tool execution itself has no fixed
   five-second timeout; caller cancellation and shutdown still end work. No tool call is replayed.
 - **Resilient catalogs:** fresh memory catalogs last one minute. Expired and restored disk catalogs
-  remain searchable with `stale: true` during one shared background refresh. A failed refresh
+  remain searchable with `stale: true`; a running server, or with `start: search` any server,
+  refreshes them in one shared background refresh. A failed refresh
   reports diagnostics without discarding last-known tools. Disk catalogs always revalidate.
   `refresh: true` waits for live discovery. Cached catalogs are not availability promises.
 - **Observability:** integration rows and `catalogs` report `source`, `observedAt`, and `availability`.
@@ -76,12 +79,9 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
 - **Shutdown:** EOF closes sessions, waits for workers and flushes queued index writes. References
   are memory-only and disappear when the hosting process ends.
 
-| Environment variable | Default | Purpose |
-| --- | --- | --- |
-| `TAP_DEADLINE_MS` | `5000` | Per-server connect/list budget; not tool execution |
-| `TAP_FAIL_TTL_MS` | `5000` | Discovery/connect retry backoff; `0` disables it |
-| `TAP_IDLE_TTL_MS` | `300000` | Close unused downstream sessions after five minutes |
-| `TAP_REFERENCES` | off | `on` offers [result references](#opt-in-result-references) to the agent |
+Deadlines, backoff, idle shutdown, start and references are [settings](settings.md), read when a
+tap process starts; their environment variables (`TAP_DEADLINE_MS`, `TAP_FAIL_TTL_MS`,
+`TAP_IDLE_TTL_MS`, `TAP_REFERENCES`) win over the config.
 
 HTTP sessions remain unwrapped so SDK protocol headers and idle notifications work. Stdio retains
 raw capture, and reads tool lists from it alone rather than decoding them twice. Application request/result metadata is forwarded; protocol identity and progress
@@ -112,7 +112,7 @@ preserved, not reclassified. Stdio preserves raw numeric spelling; HTTP retains 
 
 ## Opt-in result references
 
-References are off unless `TAP_REFERENCES=on` is set where tap runs. Off, `plugin_call` offers
+References are off unless the `references` [setting](settings.md) is on. Off, `plugin_call` offers
 only `tool` and `arguments`, which keeps the two definitions an agent loads near 300 tokens, and
 a call that uses a reference field is refused with `reference_unavailable` before anything is
 sent. On, `plugin_call` also describes the fields below.

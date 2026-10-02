@@ -41,11 +41,12 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 		adminToken = token
 	}
 	e := registry.New(path, version)
-	s, err := server.New(hostedBackend{e}, version)
+	s, err := server.New(hostedBackend{e}, version, e.Settings())
 	if err != nil {
 		e.Close()
 		return nil, nil, err
 	}
+	go e.Warm()
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{MaxRequestBodyBytes: bodyLimit, SessionTimeout: 30 * time.Minute, PropagateRequestCancellation: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpHandler)

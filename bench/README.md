@@ -7,9 +7,9 @@ competitors should run separately as pinned benchmark baselines.
 ## Retrieval
 
 ```sh
-go run ./cmd/tap-bench --method legacy
-go run ./cmd/tap-bench --method tap
-go run ./cmd/tap-bench --input independent-corpus.json --rankings competitor-rankings.json
+go run ./cmd/bench --method legacy
+go run ./cmd/bench --method tap
+go run ./cmd/bench --input heldout.json --rankings rankings.json
 go test ./internal/discovery -run '^$' -bench . -benchmem
 ```
 
@@ -57,7 +57,7 @@ agent harness or independently judge those outcomes.
 Evaluate recorded runs without spending further credits:
 
 ```sh
-go run ./cmd/tap-bench --runs measured-runs.json
+go run ./cmd/bench --runs runs.json
 ```
 
 The file is an array of records:
@@ -88,7 +88,7 @@ The file is an array of records:
 ```
 
 These values are an example, **not measurements**. `verified` is the external verifier's assertion,
-not validation performed by tap-bench. Missing outcomes/usage, negative measurements, duplicate
+not validation performed by bench. Missing outcomes/usage, negative measurements, duplicate
 runs and unmatched task/trial/environment/budget/model settings across systems are rejected.
 Reports are grouped by system/model. Cost per success includes money spent on unsuccessful runs;
 if none succeeds it is null, not a misleading zero. Latency is reported across successes and

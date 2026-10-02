@@ -21,6 +21,9 @@ short introduction instead of waiting for an agent that is not there.
 | `tap remote use URL` | Select a remote for CLI commands and stdio relays |
 | `tap remote off` | Return to the saved local registry |
 | `tap remote status` | Print the selected relay endpoint |
+| `tap config [NAME]` | Show the [settings](settings.md), or one of them |
+| `tap config set NAME VALUE` | Change a setting; `--server NAME` for one server's own |
+| `tap config unset NAME` | Return a setting to its default, or a server to the general value |
 | `tap path` | Print the config file tap reads |
 | `tap version` | Print the version |
 | `tap help [COMMAND]` | Help for tap, or for one command |
@@ -42,11 +45,11 @@ Everything after `--` is taken as written: for `tap add`, it is the server's com
 | --- | --- | --- |
 | `-h`, `--help` | all | Show help |
 | `--version` | `tap` | Print the version |
-| `--json` | `import`, `list`, `refresh`, `search`, `call` | Print JSON instead of text |
+| `--json` | `import`, `list`, `refresh`, `search`, `call`, `config` | Print JSON instead of text |
 | `--local` | `import`, `add`, `remove`, `list`, `refresh`, `search`, `inspect`, `call`, `auth` | Use this machine's servers while a remote is selected |
 | `--cached` | `list` | Print the tool lists tap has saved, without asking the servers |
-| `--server NAME` | `search` | Look only in this server; with no query, list its tools |
-| `--limit N` | `search` | How many tools to print: a whole number of at least 1 (default 8) |
+| `--server NAME` | `search`, `config` | Look only in this server; with no query, list its tools. For `config`, the server whose own setting to read or change |
+| `--limit N` | `search` | How many tools to print: a whole number of at least 1 (default: the `searchLimit` setting, 8) |
 | `--offset N` | `search` | Skip this many matches, to continue a longer list |
 | `--refresh` | `search` | Ask the servers for their tools first |
 | `--detail auto\|full\|summary` | `search` | With `--json`: whole schemas, or summaries (default `full`) |
@@ -147,10 +150,10 @@ tap search echo --json
 }
 ```
 
-`tap search`, like an agent's tap, answers at once from the tool lists tap has saved and
-refreshes them in the background; `stale: true` marks a match whose server has not answered
-since. `--refresh` waits for the servers first. `tap list` always asks them, so what it prints
-is how things are now. See [How it works](how-it-works.md).
+`tap search`, like an agent's tap, answers at once from the tool lists tap has saved, without
+starting their servers; `stale: true` marks a match whose server has not answered since. The
+[start setting](settings.md#when-servers-start) changes that. `--refresh` asks the servers first. `tap list` always asks them, so what it prints
+is how things are now. See [Internals](internals.md).
 
 `tap inspect SERVER.TOOL` prints one tool's description and its input and output schemas as
 JSON, asking only the server that has it.

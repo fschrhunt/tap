@@ -184,6 +184,28 @@ func TestCLISearchLimit(t *testing.T) {
 	}
 }
 
+// TestCLIConfig pins tap config: a set value is kept and used by the next command, a value
+// the setting does not take is refused without changing anything, and a server's own value
+// wins over the general one.
+func TestCLIConfig(t *testing.T) {
+	b := sandbox(t)
+	b.write(map[string]any{"servers": map[string]any{"fixture": definition()}})
+	equal(t, output(t, b.run("config", "set", "searchLimit", "1")), "searchLimit is now 1")
+	r := decode(t, output(t, b.run("search", "fixture", "--json"))).(map[string]any)
+	equal(t, len(r["matches"].([]any)), 1)
+	refused := b.run("config", "set", "searchLimit", "100")
+	equal(t, refused.status, 2)
+	contains(t, refused.stderr, "searchLimit takes a whole number from 1 to 25")
+	equal(t, output(t, b.run("config", "searchLimit")), "1")
+	output(t, b.run("config", "set", "start", "search"))
+	output(t, b.run("config", "set", "start", "start", "--server", "fixture"))
+	equal(t, output(t, b.run("config", "start")), "search")
+	equal(t, output(t, b.run("config", "start", "--server", "fixture")), "start")
+	settings := decode(t, output(t, b.run("config", "--json"))).(map[string]any)
+	equal(t, settings["settings"].(map[string]any)["searchLimit"], map[string]any{"value": float64(1), "from": "config"})
+	equal(t, settings["servers"], map[string]any{"fixture": map[string]any{"start": "start"}})
+}
+
 // TestLiteralUnicodeEscape protects JSON serialization of text containing literal escape syntax.
 func TestLiteralUnicodeEscape(t *testing.T) {
 	b := sandbox(t)

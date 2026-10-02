@@ -27,8 +27,8 @@ import (
 // Engine holds resident sessions and caches for one fixed config path and version.
 type Engine struct {
 	Path, Version         string
+	settings              config.Values
 	deadline              time.Duration
-	deadlineMS            float64
 	mu                    sync.Mutex
 	entries               map[string]*entry
 	ctx                   context.Context
@@ -57,22 +57,28 @@ type entry struct {
 	idle                         time.Duration
 }
 
-// New creates an engine without opening any downstream connections.
+// New creates an engine without opening any downstream connections. Its settings are read
+// once, here: a tap process keeps the ones it started with.
 func New(path, version string) *Engine {
-	ms := wire.Number(os.Getenv("TAP_DEADLINE_MS"))
-	if math.IsNaN(ms) || ms == 0 {
-		ms = 5000
-	}
-	durationMS := ms
-	if ms < 1 || ms > 2147483647 {
-		durationMS = 1
-	}
+	s := config.LoadValues(path)
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	ctx, cancel := context.WithCancel(context.Background())
-	e := &Engine{Path: path, Version: version, deadline: time.Duration(durationMS * float64(time.Millisecond)), deadlineMS: ms, entries: map[string]*entry{}, ctx: ctx, cancel: cancel, indexDirty: make(chan struct{}, 1), indexDone: make(chan struct{}), definitions: map[string]string{}, catalogs: map[string]*catalog{}, slots: make(chan struct{}, 8), failTTL: envDuration("TAP_FAIL_TTL_MS", 5*time.Second), idleTTL: envDuration("TAP_IDLE_TTL_MS", 5*time.Minute)}
+	e := &Engine{Path: path, Version: version, settings: s, deadline: ms(s.DeadlineMs), entries: map[string]*entry{}, ctx: ctx, cancel: cancel, indexDirty: make(chan struct{}, 1), indexDone: make(chan struct{}), definitions: map[string]string{}, catalogs: map[string]*catalog{}, slots: make(chan struct{}, 8), failTTL: ms(s.RetryAfterMs), idleTTL: ms(s.IdleTimeoutMs)}
 	e.workers.Add(1)
 	go e.reap()
 	go e.persistIndex()
 	return e
+}
+
+// Settings returns the settings this engine was started with.
+func (e *Engine) Settings() config.Values { return e.settings }
+
+// start says when this server may be started: its own start setting, or the engine's.
+func (e *Engine) start(def wire.Object) string {
+	if s, ok := def.Get("start").(string); ok {
+		return s
+	}
+	return e.settings.Start
 }
 
 // Message formats SDK errors without exposing credential-bearing endpoint URLs.
@@ -98,7 +104,7 @@ func Message(err error) string {
 // deadlineError replaces SDK context errors with tap's per-server error.
 func (e *Engine) deadlineError(ctx context.Context, err error) error {
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("server deadline exceeded (%s ms)", wire.String(e.deadlineMS))
+		return fmt.Errorf("server deadline exceeded (%d ms)", e.settings.DeadlineMs)
 	}
 	return err
 }
@@ -177,6 +183,11 @@ func (e *Engine) open(name string, def wire.Object, quiet bool, ent *entry) {
 		defer cancel()
 		transport, terr := transportFor(e.Path, name, def, quiet)
 		err = terr
+		// A server that starts with tap keeps running while tap does, unless it has its own
+		// idle timeout.
+		if e.start(def) == config.StartWithTap {
+			ent.idle = time.Duration(math.MaxInt64)
+		}
 		if def.Has("idleTimeoutMs") {
 			ms, ok := def.Get("idleTimeoutMs").(float64)
 			if !ok || ms <= 0 || ms > 86400000 || ms != math.Trunc(ms) || !endpointIsStdio(def) {
