@@ -85,6 +85,9 @@ func TestExistingSessionAdoptsServers(t *testing.T) {
 	if result, err := c.Listing(ctx, true); err != nil || len(result.Get("integrations").([]any)) != 0 {
 		t.Fatalf("initial listing: %v %v", result, err)
 	}
+	if result, err := c.Listing(ctx, true); err != nil || result.Has("config") {
+		t.Fatalf("remote listing exposed host config path: %v %v", result, err)
+	}
 	if _, err := c.Edit(ctx, "fixture", wire.Object{{Name: "url", Value: downstream.URL}}); err != nil {
 		t.Fatal(err)
 	}

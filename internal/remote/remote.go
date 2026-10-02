@@ -489,6 +489,8 @@ func (e hostedBackend) Listing(ctx context.Context, quiet bool) (wire.Object, er
 	if err != nil {
 		return nil, fmt.Errorf("cannot read remote registry")
 	}
+	// A remote client needs the catalog, not the host's local filesystem path.
+	out.Delete("config")
 	return safeCatalog(out, "integrations"), nil
 }
 

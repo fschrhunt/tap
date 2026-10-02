@@ -267,7 +267,11 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		}
 		rows := result.Get("integrations").([]any)
 		if len(rows) == 0 {
-			print(out, "no servers configured ("+e.Path+")", false)
+			if relay != nil {
+				print(out, "no servers configured (remote)", false)
+			} else {
+				print(out, "no servers configured ("+e.Path+")", false)
+			}
 			return 0, nil
 		}
 		lines := []string{}

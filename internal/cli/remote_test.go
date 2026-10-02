@@ -48,6 +48,9 @@ func TestRemoteRouting(t *testing.T) {
 	}
 	run("search")
 	run("remove", "host")
+	if output := run("list"); strings.TrimSpace(output) != "no servers configured (remote)" {
+		t.Fatalf("empty remote listing used local config: %q", output)
+	}
 	hosted, _ = config.Load(hostPath)
 	if len(hosted) != 0 {
 		t.Fatal("remove did not route remote")
