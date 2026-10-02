@@ -21,9 +21,19 @@ behind session-local references rather than filling the agent's context.
 
 ## Install
 
-Download the archive for your OS and architecture from
-[Releases](https://github.com/fschrhunt/tap/releases), extract it, and put `tap` on your `PATH`.
-It is one binary; no Node runtime is needed.
+One binary; no Node runtime is needed. The script downloads the release for your machine and
+checks it against the release's checksums:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh
+```
+
+With Homebrew:
+
+```sh
+brew tap fschrhunt/tap https://github.com/fschrhunt/tap
+brew install fschrhunt/tap/tap
+```
 
 With Go 1.26 or newer:
 
