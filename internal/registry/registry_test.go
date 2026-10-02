@@ -775,3 +775,44 @@ func TestStartWithTapKeepsServerRunning(t *testing.T) {
 		t.Fatalf("running %v after %d connections", running, p.connects.Load())
 	}
 }
+
+// TestListChangedDuringRefreshAnswers pins the retry: a list_changed notification that lands
+// while the refresh is fetching marks the catalog stale, so the waiting caller fetches again
+// instead of being told the catalog changed. The peer holds its list response until tap's
+// handler has taken the invalidation, which makes the race land every time.
+func TestListChangedDuringRefreshAnswers(t *testing.T) {
+	var e *Engine
+	var server *mcp.Server
+	var lists atomic.Int32
+	p := newPeer(t, func(_ context.Context, method string, _ mcp.Request) (mcp.Result, error, bool) {
+		if method == "tools/list" && lists.Add(1) == 2 {
+			addTool(server, "second")
+			until := time.Now().Add(2 * time.Second)
+			for time.Now().Before(until) {
+				e.mu.Lock()
+				raced := e.catalogs["test"] != nil && e.catalogs["test"].revision > 0
+				e.mu.Unlock()
+				if raced {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+		return nil, nil, false
+	})
+	server = p.server
+	e = testEngine(t, definitions(p.url))
+	listing(t, e)
+	snapshot, err := e.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := snapshot.servers.Get("test").(wire.Object)
+	tools, err := e.liveTools(context.Background(), "test", def, snapshot.fingerprints["test"], true, nil)
+	if err != nil {
+		t.Fatalf("refresh with a racing invalidation: %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("a changed list was not taken: %d tools", len(tools))
+	}
+}

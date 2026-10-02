@@ -25,6 +25,10 @@ import (
 const catalogTTL = time.Minute
 const maxCatalogBytes = 16 << 20
 
+// staleRefreshes bounds how often an invalidation that lands mid-fetch makes the caller wait
+// for one more fetch before the churn is reported.
+const staleRefreshes = 2
+
 // indexOpening is the first line of the saved index, and names its layout.
 const indexOpening = `{"version":2,"servers":{`
 
@@ -185,49 +189,63 @@ func (e *Engine) toolsFor(ctx context.Context, name string, def wire.Object, fin
 
 // liveTools waits for a successful catalog belonging to the calling session.
 // A nil session requests an explicit refresh; stale descriptors are never used to validate calls.
+// An invalidation that lands mid-fetch marks the catalog stale, so the caller waits for one more
+// fetch rather than being told the catalog changed.
 func (e *Engine) liveTools(ctx context.Context, name string, def wire.Object, fingerprint string, quiet bool, ent *entry) ([]wire.Object, error) {
-	e.mu.Lock()
-	if e.ctx.Err() != nil {
+	for attempt := 0; ; attempt++ {
+		e.mu.Lock()
+		if e.ctx.Err() != nil {
+			e.mu.Unlock()
+			return nil, e.ctx.Err()
+		}
+		if e.definitions[name] != fingerprint {
+			e.mu.Unlock()
+			return nil, fmt.Errorf("server configuration changed")
+		}
+		c := e.catalogs[name]
+		if c == nil {
+			c = &catalog{fingerprint: fingerprint}
+			e.catalogs[name] = c
+		}
+		if ent != nil && c.good && c.session == ent && time.Since(c.at) < catalogTTL && c.err == nil {
+			tools := c.tools
+			e.mu.Unlock()
+			return tools, nil
+		}
+		if c.refreshing == nil {
+			c.at = time.Time{}
+			c.retryAt = time.Time{}
+			c.refreshing = make(chan struct{})
+			e.workers.Add(1)
+			go e.refresh(name, def, quiet, c)
+		}
+		done := c.refreshing
 		e.mu.Unlock()
-		return nil, e.ctx.Err()
-	}
-	if e.definitions[name] != fingerprint {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-done:
+		}
+		e.mu.Lock()
+		if c.err != nil {
+			err := c.err
+			e.mu.Unlock()
+			return nil, err
+		}
+		switch {
+		case e.catalogs[name] != c || (ent != nil && c.session != ent):
+			e.mu.Unlock()
+			return nil, fmt.Errorf("catalog changed during refresh")
+		case c.good && time.Since(c.at) < catalogTTL:
+			tools := c.tools
+			e.mu.Unlock()
+			return tools, nil
+		}
 		e.mu.Unlock()
-		return nil, fmt.Errorf("server configuration changed")
+		if attempt >= staleRefreshes {
+			return nil, fmt.Errorf("catalog changed during refresh")
+		}
 	}
-	c := e.catalogs[name]
-	if c == nil {
-		c = &catalog{fingerprint: fingerprint}
-		e.catalogs[name] = c
-	}
-	if ent != nil && c.good && c.session == ent && time.Since(c.at) < catalogTTL && c.err == nil {
-		tools := c.tools
-		e.mu.Unlock()
-		return tools, nil
-	}
-	if c.refreshing == nil {
-		c.at = time.Time{}
-		c.retryAt = time.Time{}
-		c.refreshing = make(chan struct{})
-		e.workers.Add(1)
-		go e.refresh(name, def, quiet, c)
-	}
-	done := c.refreshing
-	e.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-done:
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if c.err != nil {
-		return nil, c.err
-	}
-	if e.catalogs[name] != c || !c.good || time.Since(c.at) >= catalogTTL || (ent != nil && c.session != ent) {
-		return nil, fmt.Errorf("catalog changed during refresh")
-	}
-	return c.tools, nil
 }
 
 // running reports whether a session with the server is open. The caller holds e.mu.
