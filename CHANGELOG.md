@@ -1,6 +1,6 @@
 # tap releases
 
-## Unreleased
+## v1.0.0 · 2026-10-02
 
 - Releases: `scripts/release.sh` names the Unreleased section in a PR, then tags it once CI has
   passed; the tag builds checksummed archives for macOS and Linux with build provenance, release
