@@ -1,6 +1,6 @@
 # tap releases
 
-## Unreleased
+## v1.0.2 · 2026-10-02
 
 - A command run without the remote's token variable now names it: `tap: remote
   token environment variable TAP_REMOTE_TOKEN is not set`.
