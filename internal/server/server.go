@@ -1,4 +1,4 @@
-// Package server exposes tap's two-tool MCP surface over stdio. The SDK answers tools/list and
+// Package server exposes tap's two-tool MCP surface over stdio and HTTP. The SDK answers tools/list and
 // wraps every result, so tap follows whichever MCP revision each client speaks; tap supplies the
 // tools' definitions, argument checks, results and its two JSON-RPC refusals.
 package server
@@ -46,18 +46,46 @@ const definitions = `[
 }}}
 ]`
 
+// Backend is the shared contract for local engines and remote relays.
+type Backend interface {
+	Listing(context.Context, bool) (wire.Object, error)
+	Search(context.Context, string, float64, bool) (wire.Object, error)
+	Call(context.Context, string, any, bool) (wire.Object, error)
+	CallWithMeta(context.Context, string, any, bool, mcp.Meta) (wire.Object, error)
+	Discover(context.Context, registry.SearchOptions, bool) (wire.Object, error)
+	Refresh(context.Context, string, bool) (wire.Object, error)
+	CallWithOptions(context.Context, string, any, bool, bool, []registry.ArgumentReference, mcp.Meta) (wire.Object, error)
+	Inspect(context.Context, string, string, int, int, int) (wire.Object, error)
+	Drop(context.Context, string) (wire.Object, error)
+	Close()
+}
+
 // Serve runs until stdin closes; its caller closes all downstream connections. The SDK answers
 // tools/list and wraps every result, so both follow whichever protocol revision each client speaks;
 // tap supplies the two tools' definitions, their argument checks and their results.
-func Serve(ctx context.Context, e *registry.Engine) error {
-	var tools []*mcp.Tool
-	if err := json.Unmarshal([]byte(definitions), &tools); err != nil {
+func Serve(ctx context.Context, e Backend, version string) error {
+	s, err := New(e, version)
+	if err != nil {
 		return err
 	}
-	s := mcp.NewServer(&mcp.Implementation{Name: "tap", Version: e.Version}, &mcp.ServerOptions{Instructions: instructions + e.Overview(), Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
+	return s.Run(ctx, &mcp.IOTransport{Reader: &shutdownReader{ReadCloser: os.Stdin, close: e.Close}, Writer: stdoutWriter{os.Stdout}})
+}
+
+// New builds the static two-tool surface for stdio or HTTP.
+func New(e Backend, version string) (*mcp.Server, error) {
+	var tools []*mcp.Tool
+	if err := json.Unmarshal([]byte(definitions), &tools); err != nil {
+		return nil, err
+	}
+	guidance := instructions
+	if overview, ok := e.(interface{ Overview() string }); ok {
+		guidance += overview.Overview()
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: "tap", Version: version}, &mcp.ServerOptions{Instructions: guidance, Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
 	for _, tool := range tools {
 		name := tool.Name
 		s.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			ctx = registry.WithResultScope(ctx, req.Session.ID())
 			args := wire.Object{}
 			if len(req.Params.Arguments) > 0 {
 				if v, err := wire.Decode(req.Params.Arguments); err == nil {
@@ -67,6 +95,9 @@ func Serve(ctx context.Context, e *registry.Engine) error {
 			if err := validate(name, args); err != "" {
 				return toolError("Input validation error: Invalid arguments for tool " + name + ": " + err), nil
 			}
+			if required, ok := e.(interface{ ReferenceSessionRequired() bool }); ok && required.ReferenceSessionRequired() && req.Session.ID() == "" && name == "plugin_call" && (args.Get("resultMode") == "reference" || args.Has("argumentRefs") || args.Get("operation") == "inspect" || args.Get("operation") == "drop") {
+				return gatewayError(&registry.Failure{Code: "reference_unavailable", Message: "references require an established remote MCP session", Recovery: "Use a stateful MCP session or inline results; no backend call was sent."}), nil
+			}
 			if name == "plugin_call" && args.Has("arguments") {
 				if v, err := wire.DecodeExact(req.Params.Arguments); err == nil {
 					if exact, ok := v.(wire.Object); ok {
@@ -74,7 +105,7 @@ func Serve(ctx context.Context, e *registry.Engine) error {
 					}
 				}
 			}
-			return invoke(ctx, e, name, args), nil
+			return invoke(ctx, e, name, args, req.Params.Meta), nil
 		})
 	}
 	// Two refusals keep tap's own JSON-RPC errors: an unknown tool, and arguments that are not an object.
@@ -99,7 +130,7 @@ func Serve(ctx context.Context, e *registry.Engine) error {
 			return next(ctx, method, req)
 		}
 	})
-	return s.Run(ctx, &mcp.IOTransport{Reader: &shutdownReader{ReadCloser: os.Stdin, close: e.Close}, Writer: stdoutWriter{os.Stdout}})
+	return s, nil
 }
 
 // text is one text content item.
@@ -126,8 +157,8 @@ func gatewayError(err error) *mcp.CallToolResult {
 }
 
 // invoke runs plugin_search or plugin_call. A downstream result passes through as the SDK reads it:
-// its content, error flag and structured content.
-func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Object) *mcp.CallToolResult {
+// its metadata, content, error flag and structured content.
+func invoke(ctx context.Context, e Backend, name string, args wire.Object, meta mcp.Meta) *mcp.CallToolResult {
 	if name == "plugin_search" {
 		query, _ := args.Get("query").(string)
 		var out wire.Object
@@ -160,10 +191,10 @@ func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Obje
 		var result wire.Object
 		var err error
 		if operation == "drop" {
-			result, err = e.Drop(id)
+			result, err = e.Drop(ctx, id)
 		} else {
 			pointer, _ := args.Get("pointer").(string)
-			result, err = e.Inspect(id, pointer, intValue(args, "offset", 0), intValue(args, "limit", 100), intValue(args, "maxBytes", 32768))
+			result, err = e.Inspect(ctx, id, pointer, intValue(args, "offset", 0), intValue(args, "limit", 100), intValue(args, "maxBytes", 32768))
 		}
 		if err != nil {
 			return gatewayError(err)
@@ -182,7 +213,7 @@ func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Obje
 			refs = append(refs, registry.ArgumentReference{Target: o.Get("target").(string), Reference: o.Get("reference").(string), Pointer: o.Get("pointer").(string)})
 		}
 	}
-	result, err := e.CallWith(ctx, tool, values, false, args.Get("resultMode") == "reference", refs)
+	result, err := e.CallWithOptions(ctx, tool, values, false, args.Get("resultMode") == "reference", refs, meta)
 	if err != nil {
 		return gatewayError(err)
 	}
@@ -208,6 +239,7 @@ func invoke(ctx context.Context, e *registry.Engine, name string, args wire.Obje
 		raw, _ := wire.JSON(result.Get("structuredContent"), false)
 		passed.StructuredContent = json.RawMessage(raw)
 	}
+	passed.Meta = wire.ForwardMeta(passed.Meta)
 	return &passed
 }
 

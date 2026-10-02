@@ -53,11 +53,11 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 	if opt.MaxBytes == 0 {
 		opt.MaxBytes = 32768
 	}
-	servers, err := config.Load(e.Path)
+	snapshot, err := e.snapshot()
 	if err != nil {
 		return nil, err
 	}
-	e.reconcile(servers)
+	servers := snapshot.servers
 	scope := opt.Server
 	if len(opt.IDs) > 0 {
 		wanted := map[string]bool{}
@@ -107,7 +107,7 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 		}
 		servers = wire.Object{{Name: scope, Value: def}}
 	}
-	rows, err := e.rowsFor(ctx, servers, quiet, opt.Refresh)
+	rows, err := e.rowsFor(ctx, servers, snapshot.fingerprints, quiet, opt.Refresh)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +115,7 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 	unavailable := []any{}
 	catalogs := []any{}
 	metadata := map[string]catalog{}
+	staleServers := map[string]bool{}
 	for _, r := range rows {
 		def, _ := servers.Get(r.name).(wire.Object)
 		if _, err := policy(def); err != nil {
@@ -122,10 +123,18 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 		}
 		if r.err != "" {
 			unavailable = append(unavailable, wire.Object{{Name: "server", Value: r.name}, {Name: "error", Value: r.err}})
-			continue
 		}
+		staleServers[r.name] = r.stale
 		metadata[r.name] = r.catalog
-		catalogs = append(catalogs, wire.Object{{Name: "server", Value: r.name}, {Name: "source", Value: map[bool]string{true: "cache", false: "live"}[r.catalog.cached]}, {Name: "observedAt", Value: r.catalog.at.UTC().Format(time.RFC3339Nano)}, {Name: "availability", Value: map[bool]string{true: "not_checked", false: "reachable"}[r.catalog.cached]}})
+		availability := "not_checked"
+		if !r.cached && r.err == "" {
+			availability = "reachable"
+		}
+		row := wire.Object{{Name: "server", Value: r.name}, {Name: "tools", Value: len(r.tools)}, {Name: "source", Value: map[bool]string{true: "cache", false: "live"}[r.cached]}, {Name: "observedAt", Value: r.catalog.at.UTC().Format(time.RFC3339Nano)}, {Name: "availability", Value: availability}, {Name: "stale", Value: r.stale}}
+		if r.err != "" {
+			row.Set("error", r.err)
+		}
+		catalogs = append(catalogs, row)
 		for _, t := range r.tools {
 			name, _ := t.Get("name").(string)
 			if name != "" && checkPolicy(def, name) == nil {
@@ -148,11 +157,11 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 				return nil, fmt.Errorf("unknown tool %q; refresh its server catalog", id)
 			}
 		}
-	} else if opt.Query == "" {
+	} else if opt.Query == "" && (opt.Server != "" || opt.Refresh) {
 		for _, t := range tools {
 			ranked = append(ranked, discovery.Match{Tool: t})
 		}
-	} else {
+	} else if opt.Query != "" {
 		ranked = e.rankTools(tools, rows, opt.Query)
 	}
 	n := len(ranked)
@@ -175,6 +184,10 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 	for _, m := range ranked[start:end] {
 		full := toolView(m.Tool, true)
 		summary := toolView(m.Tool, false)
+		if staleServers[m.Tool.Server] {
+			full.Set("stale", true)
+			summary.Set("stale", true)
+		}
 		if c := metadata[m.Tool.Server]; c.instructions != "" {
 			full.Set("serverGuidance", wire.Object{{Name: "trust", Value: "untrusted_server_content"}, {Name: "text", Value: c.instructions}})
 		}
@@ -220,18 +233,18 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 func (e *Engine) rankTools(tools []discovery.Tool, rows []serverTools, query string) []discovery.Match {
 	var key strings.Builder
 	for _, r := range rows {
-		key.WriteString(r.catalog.key)
+		key.WriteString(r.catalog.fingerprint)
 		key.WriteByte(':')
 		key.WriteString(r.catalog.at.Format(time.RFC3339Nano))
 		key.WriteByte(';')
 	}
-	e.indexMu.Lock()
+	e.rankMu.Lock()
 	if e.index == nil || e.indexKey != key.String() {
 		e.index = discovery.New(tools)
 		e.indexKey = key.String()
 	}
 	index := e.index
-	e.indexMu.Unlock()
+	e.rankMu.Unlock()
 	return index.Search(query)
 }
 

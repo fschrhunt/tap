@@ -8,18 +8,36 @@
   are exposed when available. Initialization gives a bounded integration-name overview.
 - Persistent, credential/config/environment-scoped metadata caching with explicit freshness and
   unverified cached availability. Live catalog refresh, pagination and tool-list-change invalidation;
-  config changes retire old sessions. Opt-in stdio idle shutdown never stops active operations.
+  config changes retire old sessions. Per-server stdio idle timeout overrides never stop active operations.
 - Complete local input-schema validation before calling, precise value-free diagnostics and
   structured recovery errors. User-configured tool allow/deny rules fail closed. No automatic call
   retries or argument coercion; post-send protocol failures report unknown execution outcome.
-- Opt-in lossless raw-result references with bounded session memory, JSON Pointer inspection,
+- Opt-in result references (raw/lossless stdio, SDK-supported HTTP fields) with bounded session memory, JSON Pointer inspection,
   deterministic paging, release and explicit argument copies. Cross-server copies require source
-  policy grants. Results too large to retain stay inline without changing the execution outcome.
+  policy grants. References are bound to actual MCP sessions, including authenticated remote relays.
+  Results too large to retain stay inline without changing the execution outcome.
 - CLI scoped search, full inspection, metadata refresh and policy/idle flags. Offline retrieval
   benchmark compares original search and recorded competitor rankings; measured-run evaluation
   reports verified task outcomes, real token usage, cost per success and latency under matched
   task/trial/environment/budget/model settings. Development scores are not independent leaderboard
   claims. Black-box tests cover cache scope, notifications, concurrency, policy and references.
+- `tap remote serve` hosts shared connectors over authenticated HTTP or native TLS;
+  `tap remote use` selects a lazy stdio relay without changing harness configurations.
+  Server additions are discovered by existing agents on their next search. Optional
+  separate admin credentials protect connector configuration. No Tailscale dependency.
+- Discovery backs off unavailable servers, retains stale tool catalogs during refresh,
+  persists private indexes across processes, bounds cold fan-out and closes idle sessions.
+  Changed or removed definitions invalidate old sessions and tools. Tool pagination is read.
+- Preserve top-level tool result metadata, clean up raw-response capture bookkeeping,
+  and serialize configuration mutations using unique atomic temporary files.
+- Keep HTTP sessions unwrapped so the SDK sends negotiated protocol headers and
+  receives idle tool-change notifications. Forward application call metadata without
+  letting connector metadata override tap's protocol identity. Stale catalogs are marked
+  explicitly; index writes are coalesced and do not delay discovery.
+- Reject MCP HTTP redirects to prevent configured credentials leaking to other
+  destinations, and omit endpoint URLs from network-error diagnostics.
+- Document remote trust boundaries, approval limitations and cancellation behavior;
+  run the test suite with the race detector in CI.
 
 - Built with Go 1.27; building from source needs Go 1.26 or newer. The MCP SDK's dependencies
   (golang.org/x/oauth2, sync, sys and time, segmentio/asm) are on their latest releases.

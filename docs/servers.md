@@ -2,6 +2,12 @@
 
 tap reads its servers from `~/.tap/servers.json`. Set `TAP_CONFIG` to use another file.
 
+Selecting a [remote](remote.md) switches discovery, calls and CLI server edits to
+the remote registry. Local servers remain saved; use CLI `--local` to edit them.
+Environment references and paths in a remote server definition resolve on the
+remote machine. Remote selection stores the URL and token environment-variable
+name alongside `servers`, never the token itself.
+
 ## Adding servers
 
 An HTTP server (Streamable HTTP):
@@ -28,7 +34,7 @@ tap add db --env DATABASE_URL='${DATABASE_URL}' --cwd ~/code/app -- node mcp/ser
 | `--allow-tool GLOB` | Only these tool names may be discovered/called; repeat to allow more. |
 | `--deny-tool GLOB` | Block these tool names; deny wins over allow. Repeatable. |
 | `--reference-to SERVER` | Permit retained values from this server to flow to that destination. Repeatable. |
-| `--idle-timeout-ms N` | Opt-in stdio idle shutdown (1–86400000 ms); backend state is lost. |
+| `--idle-timeout-ms N` | Override the default idle timeout for stdio (1–86400000 ms); backend state is lost. |
 
 Server names cannot contain dots, since tools are named `server.tool`.
 
@@ -76,6 +82,8 @@ docs — unavailable: fetch failed
   file: `"env": { "API_KEY": "${API_KEY}" }`.
 - `command` and `cwd` may start with `~`.
 - There is no OAuth support; use a token in an environment variable.
+- HTTP redirects are rejected: configure the final MCP endpoint so static
+  authentication headers cannot be forwarded to another destination.
 - If `servers.json` is a symlink, `tap add` and `tap remove` write through it to the real file.
 
 ## Tool policy and retained-data transfer
@@ -115,5 +123,6 @@ Because calls all route through `plugin_call`, native host permissions for origi
 names may no longer apply. Configure tap policy and host restrictions explicitly. Server
 `readOnlyHint` / `destructiveHint` annotations inform the agent but never grant authorization.
 
-`idleTimeoutMs` is optional and stdio-only. Do not enable it for a browser, transaction, or other
-stateful backend unless losing its process-local state is acceptable.
+`idleTimeoutMs` is an optional stdio-only override of the default five-minute timeout
+(`TAP_IDLE_TTL_MS`). Use a suitably long timeout for a browser, transaction or other stateful
+backend unless losing its process-local state is acceptable.

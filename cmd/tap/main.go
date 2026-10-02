@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/fschrhunt/tap/internal/cli"
 )
@@ -12,4 +14,9 @@ import (
 var version = "dev"
 
 // main keeps process entry and exit separate from the CLI and gateway packages.
-func main() { os.Exit(cli.Run(context.Background(), os.Args[1:], version, os.Stdout, os.Stderr)) }
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	status := cli.Run(ctx, os.Args[1:], version, os.Stdout, os.Stderr)
+	cancel()
+	os.Exit(status)
+}

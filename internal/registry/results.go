@@ -2,6 +2,7 @@ package registry
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,32 @@ type storedResult struct {
 	raw    []byte
 	server string
 	at     time.Time
+	scope  string
+}
+
+type resultScopeKey struct{}
+
+// WithResultScope binds references to the actual MCP session, never client-supplied metadata.
+func WithResultScope(ctx context.Context, scope string) context.Context {
+	return context.WithValue(ctx, resultScopeKey{}, scope)
+}
+
+// resultScope reads the trusted server-side session identity (empty for standalone CLI calls).
+func resultScope(ctx context.Context) string {
+	scope, _ := ctx.Value(resultScopeKey{}).(string)
+	return scope
+}
+
+// scopedResult refuses cross-session reference reads before revealing retained content.
+func (s *resultStore) scopedResult(ctx context.Context, id string) (storedResult, error) {
+	v, err := s.get(id)
+	if err != nil {
+		return v, err
+	}
+	if v.scope != resultScope(ctx) {
+		return storedResult{}, &Failure{"reference_unavailable", "result reference is unavailable in this session", "Use only references created by this MCP session."}
+	}
+	return v, nil
 }
 
 // ArgumentReference explicitly copies one retained JSON value into an existing argument object.
@@ -37,6 +64,11 @@ type ArgumentReference struct{ Target, Reference, Pointer string }
 
 // retain stores a complete result or leaves it inline if retention cannot be fulfilled.
 func (s *resultStore) retain(server string, result wire.Object, b []byte) wire.Object {
+	return s.retainScoped(context.Background(), server, result, b)
+}
+
+// retainScoped stores a complete raw result under the caller's trusted session scope.
+func (s *resultStore) retainScoped(ctx context.Context, server string, result wire.Object, b []byte) wire.Object {
 	if !json.Valid(b) || len(b) > maxResultBytes {
 		meta, _ := result.Get("_meta").(wire.Object)
 		meta.Set("tap", wire.Object{{Name: "referenceUnavailable", Value: "result exceeds the 8 MiB retention limit; returned inline, do not repeat the call"}})
@@ -65,7 +97,7 @@ func (s *resultStore) retain(server string, result wire.Object, b []byte) wire.O
 		}
 		s.remove(oldest)
 	}
-	s.entries[id] = storedResult{raw: append([]byte(nil), b...), server: server, at: time.Now()}
+	s.entries[id] = storedResult{raw: append([]byte(nil), b...), server: server, at: time.Now(), scope: resultScope(ctx)}
 	s.bytes += len(b)
 	kinds := []any{}
 	seenKinds := map[string]bool{}
@@ -110,12 +142,12 @@ func (s *resultStore) expire() {
 func (s *resultStore) remove(id string) { s.bytes -= len(s.entries[id].raw); delete(s.entries, id) }
 
 // Drop explicitly releases one reference without executing any backend operation.
-func (e *Engine) Drop(id string) (wire.Object, error) {
+func (e *Engine) Drop(ctx context.Context, id string) (wire.Object, error) {
 	s := &e.results
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expire()
-	if _, ok := s.entries[id]; !ok {
+	if v, ok := s.entries[id]; !ok || v.scope != resultScope(ctx) {
 		return nil, &Failure{"reference_unavailable", "result reference is unknown, expired or evicted", "No backend operation was performed."}
 	}
 	s.remove(id)
@@ -123,8 +155,8 @@ func (e *Engine) Drop(id string) (wire.Object, error) {
 }
 
 // Inspect returns a selected value or deterministic array/object page, bounded by serialized bytes.
-func (e *Engine) Inspect(id, pointer string, offset, limit, maxBytes int) (wire.Object, error) {
-	v, err := e.results.get(id)
+func (e *Engine) Inspect(ctx context.Context, id, pointer string, offset, limit, maxBytes int) (wire.Object, error) {
+	v, err := e.results.scopedResult(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +260,7 @@ func selectPointer(value any, p string) (any, error) {
 }
 
 // resolveReferences copies explicitly authorized values before final schema validation.
-func (e *Engine) resolveReferences(target string, args any, refs []ArgumentReference, servers wire.Object) (any, error) {
+func (e *Engine) resolveReferences(ctx context.Context, target string, args any, refs []ArgumentReference, servers wire.Object) (any, error) {
 	b, err := wire.JSON(args, false)
 	if err != nil {
 		return nil, err
@@ -252,7 +284,7 @@ func (e *Engine) resolveReferences(target string, args any, refs []ArgumentRefer
 			}
 		}
 		paths = append(paths, ref.Target)
-		stored, err := e.results.get(ref.Reference)
+		stored, err := e.results.scopedResult(ctx, ref.Reference)
 		if err != nil {
 			return nil, err
 		}

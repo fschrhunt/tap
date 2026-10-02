@@ -3,7 +3,8 @@
 ## Commands
 
 - `go build -o tap ./cmd/tap` builds the binary (Go 1.26 or newer).
-- `go test ./...` runs the offline black-box suite; TestMain builds tap and its fixture once.
+- `go test ./...` runs the offline unit and black-box suites; TestMain builds tap and its fixture once.
+- `go test -race ./...` checks concurrent registry, config and remote behavior (also run in CI).
 - `go vet ./...` checks the Go code.
 - `gofmt -l .` must print nothing.
 - `./tap` serves MCP over stdio.
@@ -20,6 +21,7 @@ or modify a personal server config for tests.
 - `internal/registry/`: lazy downstream connections, deadlines, search, calls, and tool cache.
 - `internal/discovery/`: offline field-weighted capability ranking.
 - `cmd/tap-bench/` and `bench/`: frozen retrieval evaluation and recorded-ranking comparisons.
+- `internal/remote/`: authenticated HTTP hosting, remote administration and lazy client relay.
 - `internal/server/`: the two-tool MCP surface.
 - `internal/wire/`: ordered JSON and preservation of raw SDK responses.
 - `test/fixture/`: local stdio/HTTP fixture with success, error, structured, noisy and hang modes.

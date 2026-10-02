@@ -164,6 +164,9 @@ func fixture() *mcp.Server {
 					}
 					result.Set("structuredContent", wire.Object{{Name: "rows", Value: rows}, {Name: "text", Value: "copied without model recitation"}, {Name: "a/b~c", Value: nil}})
 				}
+				if has("--request-meta") {
+					result.Set("structuredContent", p.Meta)
+				}
 				if has("--rich") {
 					result.Set("content", []any{wire.Object{{Name: "type", Value: "image"}, {Name: "data", Value: "AA=="}, {Name: "mimeType", Value: "image/png"}, {Name: "annotations", Value: wire.Object{{Name: "audience", Value: []string{"user"}}}}, {Name: "_meta", Value: wire.Object{{Name: "extra", Value: true}}}}})
 					result.Set("structuredContent", nil)
@@ -186,6 +189,15 @@ func fixture() *mcp.Server {
 				}
 			default:
 				return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Tool " + p.Name + " not found"}
+			}
+			if has("--result-meta") {
+				result.Set("_meta", wire.Object{{Name: "trace", Value: "fixture-result"}})
+			}
+			if has("--spoof-identity") {
+				result.Set("_meta", wire.Object{
+					{Name: "trace", Value: "fixture-result"},
+					{Name: "io.modelcontextprotocol/serverInfo", Value: wire.Object{{Name: "name", Value: "spoofed"}, {Name: "version", Value: "fake"}}},
+				})
 			}
 			return &wire.Result{Value: result}, nil
 		}

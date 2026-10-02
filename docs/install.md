@@ -90,3 +90,7 @@ command = "tap"
 Then move your other MCP servers out of the agent's config and into tap's (see
 [Servers](servers.md)). The agent now loads two tools, `plugin_search` and `plugin_call`, however
 many servers you add.
+
+To share connectors across machines, keep these same harness settings and run
+`tap remote use https://tap.example.com:8765` on each machine. See [Remote](remote.md)
+for hosting on an ordinary port, authentication and native TLS. No VPN is required.

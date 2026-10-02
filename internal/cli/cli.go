@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/fschrhunt/tap/internal/remote"
 	"io"
 	"path"
 	"strconv"
@@ -27,16 +28,23 @@ const usage = `tap %s — Less noise. Better agents.
   tap inspect <server.tool> inspect a complete tool contract
   tap refresh [server]     refresh cached metadata and check availability
   tap call <server.tool> [k=v ...] [--args '<json>']
+  tap remote serve [--addr 127.0.0.1:7777] [--tls-cert FILE --tls-key FILE]
+  tap remote use URL [--token-env NAME] [--allow-insecure]
+  tap remote off           return to local connectors
+  tap remote status        print the relay endpoint
   tap path                 print the config file tap reads
   tap version              print the version
 
 Add flags: --env K=V, --header K=V, --cwd DIR, --bearer-token-env NAME
            --allow-tool GLOB, --deny-tool GLOB, --reference-to SERVER,
-           --idle-timeout-ms N (stdio only; opt-in state loss)
+           --idle-timeout-ms N (stdio idle override; backend state is lost)
            (--env, --header and policy flags may repeat)
 Other flags: --json prints raw output; --limit N caps search results.
 Search flags: --server NAME, --detail auto|full|summary, --offset N,
-              --max-bytes N, --refresh. Default CLI detail: full.`
+              --max-bytes N, --refresh. Default CLI detail: full.
+             --local uses local connectors for add/remove/list/search/call/inspect/refresh.
+Remote serve requires TAP_REMOTE_TOKEN; TAP_REMOTE_ADMIN_TOKEN overrides admin auth.
+Nonloopback HTTP requires --allow-insecure on both serve and use.`
 
 // Run executes a command and returns its process exit code, writing only CLI output.
 func Run(ctx context.Context, args []string, version string, stdout, stderr io.Writer) int {
@@ -131,8 +139,60 @@ func print(w io.Writer, value any, json bool) {
 
 // run preserves tap's permissive option dispatch, including command arguments after --.
 func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.Writer) (int, error) {
+	if len(args) > 0 && args[0] == "remote" {
+		return remoteCommand(ctx, args[1:], e.Path, e.Version, out)
+	}
+	local := false
+	// Flags after -- belong to the connector command.
+	for i, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--local" {
+			args = append(args[:i], args[i+1:]...)
+			local = true
+			break
+		}
+	}
+	// Parse call input before opening a backend, preserving CLI JSON diagnostics.
+	if len(args) > 1 && args[0] == "call" {
+		callArgs := append([]string(nil), args[2:]...)
+		boolean(&callArgs, "--json")
+		if _, err := toolArgs(callArgs); err != nil {
+			return 1, err
+		}
+	}
+	var backend server.Backend = e
+	var relay *remote.Client
+	if !local && (len(args) == 0 || args[0] == "add" || args[0] == "remove" || args[0] == "search" || args[0] == "call" || args[0] == "list" || args[0] == "inspect" || args[0] == "refresh") {
+		cfg, err := config.LoadRemote(e.Path)
+		if err != nil {
+			return 1, err
+		}
+		if cfg != nil {
+			relay, err = remote.New(*cfg, e.Version)
+			if err != nil {
+				return 1, err
+			}
+			defer relay.Close()
+			backend = relay
+		}
+	}
+	add := func(name string, def wire.Object) error {
+		if relay != nil {
+			_, err := relay.Edit(ctx, name, def)
+			return err
+		}
+		return config.Add(e.Path, name, def)
+	}
+	remove := func(name string) (bool, error) {
+		if relay != nil {
+			return relay.Edit(ctx, name, nil)
+		}
+		return config.Remove(e.Path, name)
+	}
 	if len(args) == 0 {
-		return 0, server.Serve(ctx, e)
+		return 0, server.Serve(ctx, backend, e.Version)
 	}
 	command := args[0]
 	args = args[1:]
@@ -226,7 +286,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			if cwd != "" {
 				def.Set("cwd", cwd)
 			}
-			if err = config.Add(e.Path, name, def); err != nil {
+			if err = add(name, def); err != nil {
 				return 1, err
 			}
 			print(out, "added "+name+" (stdio)", false)
@@ -248,7 +308,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		if bearer != "" {
 			def.Set("bearerTokenEnv", bearer)
 		}
-		if err = config.Add(e.Path, name, def); err != nil {
+		if err = add(name, def); err != nil {
 			return 1, err
 		}
 		print(out, "added "+name, false)
@@ -257,7 +317,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		if len(args) == 0 || args[0] == "" {
 			return 1, fmt.Errorf("usage: tap remove <name>")
 		}
-		removed, err := config.Remove(e.Path, args[0])
+		removed, err := remove(args[0])
 		if err != nil {
 			return 1, err
 		}
@@ -271,9 +331,9 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		var result wire.Object
 		var err error
 		if boolean(&args, "--refresh") {
-			result, err = e.Refresh(ctx, "", true)
+			result, err = backend.Refresh(ctx, "", true)
 		} else {
-			result, err = e.Listing(ctx, true)
+			result, err = backend.Listing(ctx, true)
 		}
 		if err != nil {
 			return 1, err
@@ -284,7 +344,11 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		}
 		rows := result.Get("integrations").([]any)
 		if len(rows) == 0 {
-			print(out, "no servers configured ("+e.Path+")", false)
+			if relay != nil {
+				print(out, "no servers configured (remote)", false)
+			} else {
+				print(out, "no servers configured ("+e.Path+")", false)
+			}
 			return 0, nil
 		}
 		lines := []string{}
@@ -296,6 +360,9 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			}
 			if row.Get("source") == "cache" {
 				summary += " (cached; availability not checked)"
+			}
+			if row.Get("stale") == true {
+				summary += " (stale catalog)"
 			}
 			lines = append(lines, wire.String(row.Get("server"))+" — "+summary)
 		}
@@ -309,7 +376,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		if len(args) > 0 {
 			server = args[0]
 		}
-		result, err := e.Refresh(ctx, server, true)
+		result, err := backend.Refresh(ctx, server, true)
 		if err != nil {
 			return 1, err
 		}
@@ -319,7 +386,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		if len(args) != 1 {
 			return 1, fmt.Errorf("usage: tap inspect <server.tool>")
 		}
-		result, err := e.Discover(ctx, registry.SearchOptions{IDs: args, Detail: "full", Limit: 25, MaxBytes: 16777216}, true)
+		result, err := backend.Discover(ctx, registry.SearchOptions{IDs: args, Detail: "full", Limit: 25, MaxBytes: 16777216}, true)
 		if err != nil {
 			return 1, err
 		}
@@ -365,7 +432,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			}
 		}
 		refresh := boolean(&args, "--refresh")
-		result, err := e.Discover(ctx, registry.SearchOptions{Query: strings.Join(args, " "), Server: server, Detail: detail, Limit: limit, Offset: offset, MaxBytes: budget, Refresh: refresh}, true)
+		result, err := backend.Discover(ctx, registry.SearchOptions{Query: strings.Join(args, " "), Server: server, Detail: detail, Limit: limit, Offset: offset, MaxBytes: budget, Refresh: refresh}, true)
 		if err != nil {
 			return 1, err
 		}
@@ -378,7 +445,11 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		for _, v := range matches {
 			t := v.(wire.Object)
 			desc, _ := t.Get("description").(string)
-			lines = append(lines, strings.TrimRight(wire.String(t.Get("id"))+"\n  "+desc, " \t\r\n"))
+			id := wire.String(t.Get("id"))
+			if t.Get("stale") == true {
+				id += " (stale catalog)"
+			}
+			lines = append(lines, strings.TrimRight(id+"\n  "+desc, " \t\r\n"))
 		}
 		if len(lines) == 0 {
 			hint, _ := result.Get("hint").(string)
@@ -387,8 +458,9 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 			}
 			lines = append(lines, hint)
 		}
-		total := result.Get("total").(int)
-		if next, ok := result.Get("nextOffset").(int); ok {
+		total := int(wire.Number(wire.String(result.Get("total"))))
+		if result.Has("nextOffset") {
+			next := int(wire.Number(wire.String(result.Get("nextOffset"))))
 			lines = append(lines, fmt.Sprintf("(%d more; continue with --offset %d)", total-next, next))
 		}
 		for _, v := range result.Get("unavailable").([]any) {
@@ -407,7 +479,7 @@ func run(ctx context.Context, args []string, e *registry.Engine, out, errout io.
 		if err != nil {
 			return 1, err
 		}
-		result, err := e.Call(ctx, id, values, true)
+		result, err := backend.Call(ctx, id, values, true)
 		if err != nil {
 			return 1, err
 		}
@@ -484,5 +556,77 @@ func typeName(v any) string {
 		return "boolean"
 	default:
 		return "number"
+	}
+}
+
+// remoteCommand configures the relay or hosts one shared connector registry.
+func remoteCommand(ctx context.Context, args []string, path, version string, out io.Writer) (int, error) {
+	if len(args) == 0 {
+		return 1, fmt.Errorf("usage: tap remote serve|use|off|status")
+	}
+	for i, arg := range args {
+		switch arg {
+		case "--addr", "--tls-cert", "--tls-key", "--token-env":
+			if i+1 == len(args) || strings.HasPrefix(args[i+1], "--") {
+				return 1, fmt.Errorf("%s needs a value", arg)
+			}
+		}
+	}
+	command := args[0]
+	args = args[1:]
+	switch command {
+	case "serve":
+		addr, _ := take(&args, "--addr")
+		cert, _ := take(&args, "--tls-cert")
+		key, _ := take(&args, "--tls-key")
+		insecure := boolean(&args, "--allow-insecure")
+		if len(args) != 0 {
+			return 1, fmt.Errorf("invalid remote serve arguments")
+		}
+		return 0, remote.Serve(ctx, path, version, remote.Options{Addr: addr, TLSCert: cert, TLSKey: key, AllowInsecure: insecure})
+	case "use":
+		tokenEnv, present := take(&args, "--token-env")
+		if !present {
+			tokenEnv = "TAP_REMOTE_TOKEN"
+		}
+		insecure := boolean(&args, "--allow-insecure")
+		if len(args) != 1 {
+			return 1, fmt.Errorf("usage: tap remote use URL [--token-env NAME] [--allow-insecure]")
+		}
+		endpoint, err := config.NormalizeURL(args[0], insecure)
+		if err != nil {
+			return 1, err
+		}
+		err = config.SetRemote(path, &config.Remote{URL: endpoint, TokenEnv: tokenEnv, AllowInsecure: insecure})
+		if err != nil {
+			return 1, err
+		}
+		print(out, "remote configured: "+endpoint, false)
+		return 0, nil
+	case "off":
+		if len(args) != 0 {
+			return 1, fmt.Errorf("usage: tap remote off")
+		}
+		if err := config.SetRemote(path, nil); err != nil {
+			return 1, err
+		}
+		print(out, "remote off", false)
+		return 0, nil
+	case "status":
+		if len(args) != 0 {
+			return 1, fmt.Errorf("usage: tap remote status")
+		}
+		cfg, err := config.LoadRemote(path)
+		if err != nil {
+			return 1, err
+		}
+		if cfg == nil {
+			print(out, "remote off", false)
+		} else {
+			print(out, "remote: "+cfg.URL+" (token env: "+cfg.TokenEnv+")", false)
+		}
+		return 0, nil
+	default:
+		return 1, fmt.Errorf("usage: tap remote serve|use|off|status")
 	}
 }

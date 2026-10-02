@@ -189,8 +189,14 @@ func start(t *testing.T, servers map[string]any) *harness {
 	if servers == nil {
 		servers = map[string]any{"fixture": definition()}
 	}
+	return startRoot(t, map[string]any{"servers": servers})
+}
+
+// startRoot launches a public stdio relay with the complete isolated config.
+func startRoot(t *testing.T, root map[string]any) *harness {
+	t.Helper()
 	b := sandbox(t)
-	b.write(map[string]any{"servers": servers})
+	b.write(root)
 	h := &harness{t: t, config: b.config, replies: make(chan map[string]any, 32), done: make(chan error, 1)}
 	h.cmd = exec.Command(tapBin)
 	h.cmd.Env = append(os.Environ(), "TAP_CONFIG="+h.config, "TAP_DEADLINE_MS=500", "TAP_CACHE_DIR="+filepath.Join(filepath.Dir(h.config), "cache"))

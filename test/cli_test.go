@@ -205,5 +205,9 @@ func TestDisconnectedServer(t *testing.T) {
 	b := sandbox(t)
 	b.write(map[string]any{"servers": map[string]any{"fixture": definition("--exit")}})
 	r := decode(t, output(t, b.run("list", "--json"))).(map[string]any)
-	equal(t, r["integrations"], []any{map[string]any{"server": "fixture", "tools": float64(0), "error": "Connection closed"}})
+	row := r["integrations"].([]any)[0].(map[string]any)
+	equal(t, row["server"], "fixture")
+	equal(t, row["tools"], float64(0))
+	equal(t, row["error"], "Connection closed")
+	equal(t, row["availability"], "not_checked")
 }

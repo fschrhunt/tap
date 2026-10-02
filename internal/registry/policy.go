@@ -13,6 +13,18 @@ type Failure struct{ Code, Message, Recovery string }
 // Error supplies a concise CLI diagnostic; structured MCP errors retain the code and recovery.
 func (f *Failure) Error() string { return f.Message }
 
+// causedFailure preserves SDK cancellation identity alongside value-free gateway diagnostics.
+type causedFailure struct {
+	failure *Failure
+	cause   error
+}
+
+// Error exposes only the safe gateway message, never the underlying transport error.
+func (f *causedFailure) Error() string { return f.failure.Error() }
+
+// Unwrap supports both machine-readable gateway recovery and errors.Is for cancellation.
+func (f *causedFailure) Unwrap() []error { return []error{f.failure, f.cause} }
+
 // checkPolicy enforces user-configured tool patterns; backend annotations never grant access.
 func checkPolicy(def wire.Object, tool string) error {
 	p, err := policy(def)

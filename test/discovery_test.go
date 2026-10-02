@@ -1,7 +1,6 @@
 package tap_test
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,7 +66,7 @@ func TestUsageContract(t *testing.T) {
 	equal(t, tool["serverGuidance"].(map[string]any)["trust"], "untrusted_server_content")
 }
 
-// TestMetadataPersistence searches across process restarts without launching the backend again.
+// TestMetadataPersistence restores searchable descriptors without claiming live availability.
 func TestMetadataPersistence(t *testing.T) {
 	trace := filepath.Join(t.TempDir(), "trace")
 	b := sandbox(t)
@@ -77,14 +76,9 @@ func TestMetadataPersistence(t *testing.T) {
 	cat := r["catalogs"].([]any)[0].(map[string]any)
 	equal(t, cat["source"], "cache")
 	equal(t, cat["availability"], "not_checked")
-	data, err := os.ReadFile(trace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	equal(t, strings.Count(string(data), "initialize\n"), 1)
-	output(t, b.run("refresh", "fixture"))
-	data, _ = os.ReadFile(trace)
-	equal(t, strings.Count(string(data), "initialize\n"), 2)
+	equal(t, r["matches"].([]any)[0].(map[string]any)["id"], "fixture.echo")
+	live := decode(t, output(t, b.run("refresh", "fixture"))).(map[string]any)
+	equal(t, live["integrations"].([]any)[0].(map[string]any)["availability"], "reachable")
 }
 
 // TestMetadataCredentialScope invalidates metadata when inherited credentials change.
@@ -98,18 +92,17 @@ func TestMetadataCredentialScope(t *testing.T) {
 	output(t, b.run("search", "echo", "--json"))
 	data, _ := os.ReadFile(trace)
 	equal(t, strings.Count(string(data), "initialize\n"), 2)
-	cache := filepath.Join(filepath.Dir(b.config), "cache")
-	entries, err := os.ReadDir(cache)
+	st, err := os.Stat(b.config + ".tools.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range entries {
-		st, _ := os.Stat(filepath.Join(cache, entry.Name()))
-		equal(t, st.Mode().Perm(), os.FileMode(0600))
-		raw, _ := os.ReadFile(filepath.Join(cache, entry.Name()))
-		if strings.Contains(string(raw), "first-secret") || strings.Contains(string(raw), "second-secret") {
-			t.Fatal("credentials written to metadata cache")
-		}
+	equal(t, st.Mode().Perm(), os.FileMode(0600))
+	raw, err := os.ReadFile(b.config + ".tools.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "first-secret") || strings.Contains(string(raw), "second-secret") {
+		t.Fatal("credentials written to metadata cache")
 	}
 }
 
@@ -183,24 +176,12 @@ func TestCatalogNotification(t *testing.T) {
 	}
 }
 
-// TestStaleMetadata refreshes an expired disk catalog instead of advertising stale availability.
+// TestStaleMetadata marks restored descriptors stale during background revalidation.
 func TestStaleMetadata(t *testing.T) {
 	b := sandbox(t)
 	b.write(map[string]any{"servers": map[string]any{"fixture": definition()}})
 	output(t, b.run("search", "echo", "--json"))
-	cache := filepath.Join(filepath.Dir(b.config), "cache")
-	entries, err := os.ReadDir(cache)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("cache files: %v %v", entries, err)
-	}
-	file := filepath.Join(cache, entries[0].Name())
-	raw, _ := os.ReadFile(file)
-	saved := decode(t, string(raw)).(map[string]any)
-	saved["At"] = time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano)
-	raw, _ = json.Marshal(saved)
-	if err = os.WriteFile(file, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
 	r := decode(t, output(t, b.run("search", "echo", "--json"))).(map[string]any)
-	equal(t, r["catalogs"].([]any)[0].(map[string]any)["source"], "live")
+	equal(t, r["matches"].([]any)[0].(map[string]any)["stale"], true)
+	equal(t, r["catalogs"].([]any)[0].(map[string]any)["availability"], "not_checked")
 }
