@@ -2,7 +2,7 @@
 
 ## Commands
 
-- `go build -o tap ./cmd/tap` builds the binary (Go 1.25 or newer).
+- `go build -o tap ./cmd/tap` builds the binary (Go 1.26 or newer).
 - `go test ./...` runs the offline black-box suite; TestMain builds tap and its fixture once.
 - `go vet ./...` checks the Go code.
 - `gofmt -l .` must print nothing.
