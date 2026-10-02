@@ -6,10 +6,16 @@ tap dev — Less noise. Better agents.
   tap add <name> -- <cmd>  add a stdio server (everything after -- is the command)
   tap remove <name>        remove a server
   tap search <query>       find tools, with the schemas needed to call them
+  tap inspect <server.tool> inspect a complete tool contract
+  tap refresh [server]     refresh cached metadata and check availability
   tap call <server.tool> [k=v ...] [--args '<json>']
   tap path                 print the config file tap reads
   tap version              print the version
 
 Add flags: --env K=V, --header K=V, --cwd DIR, --bearer-token-env NAME
-           (--env and --header may repeat)
+           --allow-tool GLOB, --deny-tool GLOB, --reference-to SERVER,
+           --idle-timeout-ms N (stdio only; opt-in state loss)
+           (--env, --header and policy flags may repeat)
 Other flags: --json prints raw output; --limit N caps search results.
+Search flags: --server NAME, --detail auto|full|summary, --offset N,
+              --max-bytes N, --refresh. Default CLI detail: full.

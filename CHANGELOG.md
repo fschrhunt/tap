@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Agent-oriented discovery while retaining two MCP tools: provider-scoped BM25 ranking, Unicode
+  tokenization, conservative typo recovery, server browsing, exact inspection, paging and adaptive
+  schema disclosure. Full schemas are never truncated; output schemas and untrusted server guidance
+  are exposed when available. Initialization gives a bounded integration-name overview.
+- Persistent, credential/config/environment-scoped metadata caching with explicit freshness and
+  unverified cached availability. Live catalog refresh, pagination and tool-list-change invalidation;
+  config changes retire old sessions. Opt-in stdio idle shutdown never stops active operations.
+- Complete local input-schema validation before calling, precise value-free diagnostics and
+  structured recovery errors. User-configured tool allow/deny rules fail closed. No automatic call
+  retries or argument coercion; post-send protocol failures report unknown execution outcome.
+- Opt-in lossless raw-result references with bounded session memory, JSON Pointer inspection,
+  deterministic paging, release and explicit argument copies. Cross-server copies require source
+  policy grants. Results too large to retain stay inline without changing the execution outcome.
+- CLI scoped search, full inspection, metadata refresh and policy/idle flags. Offline retrieval
+  benchmark compares original search and recorded competitor rankings; measured-run evaluation
+  reports verified task outcomes, real token usage, cost per success and latency under matched
+  task/trial/environment/budget/model settings. Development scores are not independent leaderboard
+  claims. Black-box tests cover cache scope, notifications, concurrency, policy and references.
+
 - Built with Go 1.27; building from source needs Go 1.26 or newer. The MCP SDK's dependencies
   (golang.org/x/oauth2, sync, sys and time, segmentio/asm) are on their latest releases.
 - Clients on MCP 2026-07-28 (current Claude Code) can list and call tap's tools again: the SDK now

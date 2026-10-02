@@ -112,7 +112,19 @@ func JSON(value any, pretty bool) ([]byte, error) {
 
 // Decode parses JSON while retaining object property order.
 func Decode(data []byte) (any, error) {
+	return decodeJSON(data, false)
+}
+
+// DecodeExact preserves numeric JSON spelling for tool arguments and retained/inline results.
+// Configuration and gateway control fields continue to use Decode's float64 values.
+func DecodeExact(data []byte) (any, error) { return decodeJSON(data, true) }
+
+// decodeJSON shares ordered parsing while optionally retaining numbers as json.Number.
+func decodeJSON(data []byte, exact bool) (any, error) {
 	d := json.NewDecoder(bytes.NewReader(data))
+	if exact {
+		d.UseNumber()
+	}
 	v, err := decode(d)
 	if err != nil {
 		return nil, err
