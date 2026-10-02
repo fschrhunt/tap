@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,6 +38,14 @@ type Required struct{ Server string }
 func (r *Required) Error() string {
 	return fmt.Sprintf("needs you to sign in: run \"tap auth %s\"", r.Server)
 }
+
+// requiredMessage matches exactly what Required.Error prints, and nothing around it.
+var requiredMessage = regexp.MustCompile(`^needs you to sign in: run "tap auth [^"]+"$`)
+
+// IsRequiredMessage reports whether msg is tap's own sign-in instruction rather than a
+// connector's diagnostics. The instruction carries only a server's name, so a relay may
+// show it to remote clients where it masks every other error.
+func IsRequiredMessage(msg string) bool { return requiredMessage.MatchString(msg) }
 
 // grant is one server's sign-in: the client tap is registered as, where its tokens are
 // renewed, and the token itself. URL binds it to the endpoint it was given for.
