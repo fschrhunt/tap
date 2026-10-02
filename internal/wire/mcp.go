@@ -20,10 +20,25 @@ func (r *Result) MarshalJSON() ([]byte, error) { return JSON(r.Value, false) }
 
 type captureKey struct{}
 
+// capture is one request's slot for its response. take means the caller reads the response
+// from the slot alone.
+type capture struct {
+	raw  *json.RawMessage
+	take bool
+}
+
 // Capture gives one SDK request a slot for its unmodified response JSON.
 func Capture(ctx context.Context) (context.Context, *json.RawMessage) {
 	raw := new(json.RawMessage)
-	return context.WithValue(ctx, captureKey{}, raw), raw
+	return context.WithValue(ctx, captureKey{}, capture{raw, false}), raw
+}
+
+// Take is Capture for a response the caller reads only from the slot. The SDK is handed an
+// empty result in its place, so a large one is not decoded a second time into types nobody
+// reads. A slot left empty means the transport does not capture, and the SDK's result is whole.
+func Take(ctx context.Context) (context.Context, *json.RawMessage) {
+	raw := new(json.RawMessage)
+	return context.WithValue(ctx, captureKey{}, capture{raw, true}), raw
 }
 
 // Transport decorates an SDK transport to retain raw responses alongside decoding.
@@ -47,7 +62,7 @@ type capturingConnection struct {
 
 // pendingCapture owns a response slot and its cancellation cleanup.
 type pendingCapture struct {
-	raw  *json.RawMessage
+	capture
 	stop func() bool
 }
 
@@ -57,9 +72,9 @@ func (c *capturingConnection) Write(ctx context.Context, msg jsonrpc.Message) er
 	var pending *pendingCapture
 	var id jsonrpc.ID
 	if req, ok := msg.(*jsonrpc.Request); ok && req.IsCall() {
-		if raw, ok := ctx.Value(captureKey{}).(*json.RawMessage); ok {
+		if slot, ok := ctx.Value(captureKey{}).(capture); ok {
 			id = req.ID
-			pending = &pendingCapture{raw: raw}
+			pending = &pendingCapture{capture: slot}
 			c.mu.Lock()
 			c.pending[id] = pending
 			pending.stop = context.AfterFunc(ctx, func() {
@@ -84,13 +99,17 @@ func (c *capturingConnection) Write(ctx context.Context, msg jsonrpc.Message) er
 	return err
 }
 
-// Read retains the response before the SDK decodes typed content and schemas.
+// Read retains the response before the SDK decodes typed content and schemas, and gives the
+// SDK an empty result where the caller has taken the response for itself.
 func (c *capturingConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
 	msg, err := c.Connection.Read(ctx)
 	if res, ok := msg.(*jsonrpc.Response); ok {
 		c.mu.Lock()
 		if slot := c.pending[res.ID]; slot != nil {
 			*slot.raw = append(json.RawMessage(nil), res.Result...)
+			if slot.take && res.Error == nil {
+				res.Result = json.RawMessage("{}")
+			}
 			slot.stop()
 			delete(c.pending, res.ID)
 		}

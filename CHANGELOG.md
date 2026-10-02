@@ -18,18 +18,48 @@
   and reasons a server is unavailable are written for a person.
 - **Changed:** a command called wrongly now exits 2 and prints its usage. `tap call` exits 1
   when the tool reports an error, and `tap remove` when there is no such server; both used to
-  exit 0. `tap search` needs a query, and `--limit` a whole number of at least 1. `tap add`
-  refuses an address that is not http or https, and says `replaced` when the name existed.
-  `tap list` and `tap search` wait for each server to answer afresh instead of printing a saved
-  catalog marked stale. Text output is aligned in columns; use `--json` in scripts.
-- Faster first answers. A search from a new process reads the saved tool index without
-  decoding every schema, JSON is read in one pass, and query words are split without regular
-  expressions. A tap that serves an agent answers from the saved index first and revalidates
-  it a quarter second later. An unchanged, settled config file is not read again on every
-  search and call. With
-  five servers and 213 tools, a first tool result from a cold start took 6.9 ms, down from
-  10.0 ms, and a later call adds 0.19 ms, down from 0.30 ms: medians of 30 local Linux/amd64
-  runs. Search results are byte-for-byte the same.
+  exit 0. `tap search` needs a query or `--server`, and `--limit` a whole number of at least 1.
+  `tap add` refuses an address that is not http or https, and says `replaced` when the name
+  existed. `tap list` asks each server afresh instead of printing a saved catalog marked stale;
+  `tap list --cached` prints the saved one. Text output is aligned in columns; use `--json` in
+  scripts.
+- **Changed:** the two tools an agent loads take about 300 tokens, down from about 870 with
+  references described. `plugin_call` offers `tool` and `arguments`; result references, their
+  fields and their guidance are offered only when `TAP_REFERENCES=on` is set where tap runs,
+  and are refused with `reference_unavailable` otherwise.
+- **Changed:** a search returns the tools that hold every word of the query, and only when none
+  does, the tools that hold any. A query that is a tool's name or id returns that tool. Results
+  used to include every tool sharing one word, so `get me` no longer buries `github.get_me`.
+  Scores and their order are otherwise the same, and the frozen retrieval benchmark is unchanged
+  at 95.8% recall@1 with a third of the bytes in the top eight definitions.
+- Faster first answers, with less memory. JSON is read and written in one pass. Searches read
+  the catalogs directly instead of building an index first. The saved tool index is laid out
+  one tool to a line, read side by side, and read while a serving tap answers its first
+  messages. A server that answers the tool list it last answered is recognised by digest and
+  is not decoded, or saved, again; over stdio the SDK no longer decodes tool lists a second
+  time. An unchanged, settled config file is not read again on every search and call. With five
+  servers and 213 real tools, a cold tap is ready in 3.3 ms and returns a first tool result in
+  7.4 ms, where the build before this work took 18.9 ms, and its memory high-water mark is
+  17 MiB, down from 25 MiB: medians of 30 local Linux/amd64 runs.
+- Agent-oriented discovery while retaining two MCP tools: provider-scoped BM25 ranking, Unicode
+  tokenization, conservative typo recovery, server browsing, exact inspection, paging and adaptive
+  schema disclosure. Full schemas are never truncated; output schemas and untrusted server guidance
+  are exposed when available. Initialization gives a bounded integration-name overview.
+- Persistent, credential/config/environment-scoped metadata caching with explicit freshness and
+  unverified cached availability. Live catalog refresh, pagination and tool-list-change invalidation;
+  config changes retire old sessions. Per-server stdio idle timeout overrides never stop active operations.
+- Complete local input-schema validation before calling, precise value-free diagnostics and
+  structured recovery errors. User-configured tool allow/deny rules fail closed. No automatic call
+  retries or argument coercion; post-send protocol failures report unknown execution outcome.
+- Opt-in result references (raw/lossless stdio, SDK-supported HTTP fields) with bounded session memory, JSON Pointer inspection,
+  deterministic paging, release and explicit argument copies. Cross-server copies require source
+  policy grants. References are bound to actual MCP sessions, including authenticated remote relays.
+  Results too large to retain stay inline without changing the execution outcome.
+- CLI scoped search, full inspection, metadata refresh and policy/idle flags. Offline retrieval
+  benchmark compares original search and recorded competitor rankings; measured-run evaluation
+  reports verified task outcomes, real token usage, cost per success and latency under matched
+  task/trial/environment/budget/model settings. Development scores are not independent leaderboard
+  claims. Black-box tests cover cache scope, notifications, concurrency, policy and references.
 - `tap remote serve` hosts shared connectors over authenticated HTTP or native TLS;
   `tap remote use` selects a lazy stdio relay without changing harness configurations.
   Server additions are discovered by existing agents on their next search. Optional

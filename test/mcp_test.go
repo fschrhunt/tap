@@ -65,7 +65,13 @@ func TestMCP(t *testing.T) {
 	t.Run("plugin_search without a query returns the server catalog", func(t *testing.T) {
 		h := start(t, nil)
 		h.initialize()
-		equal(t, h.search(nil), map[string]any{"config": h.config, "integrations": []any{map[string]any{"server": "fixture", "tools": float64(3)}}})
+		r := h.search(nil)
+		equal(t, r["config"], h.config)
+		row := r["integrations"].([]any)[0].(map[string]any)
+		equal(t, row["server"], "fixture")
+		equal(t, row["tools"], float64(3))
+		equal(t, row["source"], "live")
+		equal(t, row["availability"], "reachable")
 	})
 	t.Run("plugin_search with nonsense returns no matches and a recovery hint", func(t *testing.T) {
 		h := start(t, nil)
@@ -140,24 +146,45 @@ func TestMCP(t *testing.T) {
 	})
 }
 
-// TestSurface pins every visible tool attribute against the original Node snapshot.
+// TestSurface protects explicit reference operations without broadening ordinary arguments.
 func TestSurface(t *testing.T) {
 	h := start(t, nil)
 	h.initialize()
-	b, err := os.ReadFile("testdata/surface.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Compared by name: the order of tools carries no meaning, and the SDK adds fields such as ttlMs
-	// that tap does not decide.
-	byName := func(list map[string]any) map[string]any {
-		out := map[string]any{}
-		for _, tool := range list["tools"].([]any) {
-			out[tool.(map[string]any)["name"].(string)] = tool
+	for _, v := range h.request("tools/list", nil)["tools"].([]any) {
+		tool := v.(map[string]any)
+		if tool["name"] != "plugin_call" {
+			continue
 		}
-		return out
+		schema := tool["inputSchema"].(map[string]any)
+		props := schema["properties"].(map[string]any)
+		equal(t, props["arguments"].(map[string]any)["type"], "object")
+		equal(t, props["operation"].(map[string]any)["enum"], []any{"call", "inspect", "drop"})
+		equal(t, props["argumentRefs"].(map[string]any)["items"].(map[string]any)["additionalProperties"], false)
 	}
-	equal(t, byName(h.request("tools/list", nil)), byName(decode(t, string(b)).(map[string]any)))
+}
+
+// TestLeanSurface pins what an agent carries by default: two tools whose definitions stay
+// small, with the result-reference parameters absent and their use refused until turned on.
+func TestLeanSurface(t *testing.T) {
+	t.Setenv("TAP_REFERENCES", "off")
+	h := start(t, nil)
+	h.initialize()
+	tools := h.request("tools/list", nil)["tools"].([]any)
+	size := 0
+	for _, v := range tools {
+		tool := v.(map[string]any)
+		core, _ := json.Marshal(map[string]any{"name": tool["name"], "description": tool["description"], "input_schema": tool["inputSchema"]})
+		size += len(core)
+		if tool["name"] == "plugin_call" {
+			props := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			equal(t, len(props), 2)
+		}
+	}
+	if len(tools) != 2 || size > 1300 {
+		t.Fatalf("the default surface is %d tools and %d bytes; it must stay two tools under 1300 bytes", len(tools), size)
+	}
+	failureCode(t, invokeCall(h, map[string]any{"tool": "fixture.data", "resultMode": "reference"}), "reference_unavailable")
+	equal(t, h.call("echo", map[string]any{"message": "plain calls work"})["content"].([]any)[0].(map[string]any)["text"], "plain calls work")
 }
 
 // TestSearchLimit protects total-before-limit and the requested shortlist size.
@@ -173,7 +200,7 @@ func TestSearchLimit(t *testing.T) {
 func TestSearchDefaultLimit(t *testing.T) {
 	h := start(t, map[string]any{"fixture1": definition(), "fixture2": definition(), "fixture3": definition()})
 	h.initialize()
-	r := h.search(map[string]any{"query": "fixture"})
+	r := h.search(map[string]any{"query": "return echo"})
 	equal(t, r["total"], float64(9))
 	equal(t, len(r["matches"].([]any)), 8)
 }
@@ -199,18 +226,18 @@ func TestSearchValidation(t *testing.T) {
 	}
 }
 
-// TestCallErrors protects unknown IDs and downstream validation messages.
+// TestCallErrors protects actionable gateway error classification before execution.
 func TestCallErrors(t *testing.T) {
 	h := start(t, nil)
 	h.initialize()
 	for _, tool := range []string{"unknown", "echo"} {
 		r := h.call(tool, nil)
 		equal(t, r["isError"], true)
-		text := r["content"].([]any)[0].(map[string]any)["text"].(string)
 		if tool == "unknown" {
-			equal(t, text, "fixture.unknown failed: Tool unknown not found. If the tool id or arguments are wrong, run plugin_search to look them up.")
+			equal(t, r["structuredContent"].(map[string]any)["code"], "unknown_tool")
 		} else {
-			equal(t, text, "Input validation error: Invalid arguments for tool echo: message: Invalid input: expected string, received undefined")
+			equal(t, r["structuredContent"].(map[string]any)["code"], "invalid_arguments")
+			contains(t, r["content"].([]any)[0].(map[string]any)["text"].(string), "/message: required field is missing")
 		}
 	}
 }
@@ -325,7 +352,9 @@ func TestStreamableHTTP(t *testing.T) {
 	}
 	h := start(t, map[string]any{"fixture": map[string]any{"url": scanner.Text(), "headers": map[string]any{"X-Test": "${TAP_TEST_HEADER}:${UNSET_TAP_TEST}"}, "bearerTokenEnv": "TAP_TEST_TOKEN"}})
 	h.initialize()
-	equal(t, h.search(nil)["integrations"], []any{map[string]any{"server": "fixture", "tools": float64(3)}})
+	row := h.search(nil)["integrations"].([]any)[0].(map[string]any)
+	equal(t, row["tools"], float64(3))
+	equal(t, row["availability"], "reachable")
 	equal(t, h.call("echo", map[string]any{"message": "over HTTP"})["content"], []any{map[string]any{"type": "text", "text": "over HTTP"}})
 }
 

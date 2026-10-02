@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Field is one named value in an Object.
@@ -74,7 +75,7 @@ func (o *Object) Delete(name string) {
 	}
 }
 
-// MarshalJSON encodes an object without sorting its keys.
+// MarshalJSON encodes an object without sorting its keys, for encoding/json.
 func (o Object) MarshalJSON() ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteByte('{')
@@ -82,8 +83,8 @@ func (o Object) MarshalJSON() ([]byte, error) {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		k, _ := JSON(f.Name, false)
-		v, err := JSON(f.Value, false)
+		k, _ := encodeJSON(f.Name, false)
+		v, err := encodeJSON(f.Value, false)
 		if err != nil {
 			return nil, err
 		}
@@ -95,8 +96,19 @@ func (o Object) MarshalJSON() ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// JSON encodes JSON without HTML escapes, with optional two-space indentation.
+// JSON encodes JSON without HTML escapes, with optional two-space indentation. Values made of
+// objects, arrays, strings, numbers, booleans and null are written in one pass; any other
+// value is encoded by encoding/json, whose output the pass matches byte for byte.
 func JSON(value any, pretty bool) ([]byte, error) {
+	if b, ok := appendJSON(make([]byte, 0, 512), value, pretty, 0); ok {
+		return b, nil
+	}
+	return encodeJSON(value, pretty)
+}
+
+// encodeJSON encodes through encoding/json. It is the reference for JSON: slower, and the
+// encoder for every value JSON does not write itself.
+func encodeJSON(value any, pretty bool) ([]byte, error) {
 	var b bytes.Buffer
 	e := json.NewEncoder(&b)
 	e.SetEscapeHTML(false)
@@ -111,41 +123,194 @@ func JSON(value any, pretty bool) ([]byte, error) {
 	return []byte(s), nil
 }
 
+// appendJSON writes a value as encodeJSON would, at the given nesting depth when pretty. It
+// reports false for a value it does not write itself, and the caller starts over.
+func appendJSON(b []byte, value any, pretty bool, depth int) ([]byte, bool) {
+	line := func(b []byte, depth int) []byte {
+		if !pretty {
+			return b
+		}
+		b = append(b, '\n')
+		for range depth {
+			b = append(b, ' ', ' ')
+		}
+		return b
+	}
+	switch v := value.(type) {
+	case nil:
+		return append(b, "null"...), true
+	case bool:
+		return strconv.AppendBool(b, v), true
+	case string:
+		return appendString(b, v), true
+	case int:
+		return strconv.AppendInt(b, int64(v), 10), true
+	case float64:
+		return appendFloat(b, v)
+	case json.Number:
+		p := parser{data: []byte(v)}
+		if _, ok := p.number(); !ok || p.at != len(v) || len(v) == 0 {
+			return b, false
+		}
+		return append(b, v...), true
+	case Object:
+		if v == nil {
+			return b, false
+		}
+		if len(v) == 0 {
+			return append(b, '{', '}'), true
+		}
+		b = append(b, '{')
+		for i, f := range v {
+			if i > 0 {
+				b = append(b, ',')
+			}
+			b = appendString(line(b, depth+1), f.Name)
+			b = append(b, ':')
+			if pretty {
+				b = append(b, ' ')
+			}
+			var ok bool
+			if b, ok = appendJSON(b, f.Value, pretty, depth+1); !ok {
+				return b, false
+			}
+		}
+		return append(line(b, depth), '}'), true
+	case []any:
+		if v == nil {
+			return b, false
+		}
+		if len(v) == 0 {
+			return append(b, '[', ']'), true
+		}
+		b = append(b, '[')
+		for i, item := range v {
+			if i > 0 {
+				b = append(b, ',')
+			}
+			var ok bool
+			if b, ok = appendJSON(line(b, depth+1), item, pretty, depth+1); !ok {
+				return b, false
+			}
+		}
+		return append(line(b, depth), ']'), true
+	}
+	return b, false
+}
+
+// appendFloat writes a number the way encoding/json does: plain digits, or an exponent for
+// the very small and the very large. It reports false for a value JSON cannot hold.
+func appendFloat(b []byte, f float64) ([]byte, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return b, false
+	}
+	format := byte('f')
+	if abs := math.Abs(f); abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		format = 'e'
+	}
+	b = strconv.AppendFloat(b, f, format, -1, 64)
+	if n := len(b); format == 'e' && n >= 4 && b[n-4] == 'e' && (b[n-3] == '-' || b[n-3] == '+') && b[n-2] == '0' {
+		b[n-2] = b[n-1]
+		b = b[:n-1]
+	}
+	return b, true
+}
+
+// appendString writes a quoted string with the escapes encodeJSON ends up with: quotes,
+// backslashes and control characters escaped, invalid UTF-8 replaced, everything else as it is.
+func appendString(b []byte, s string) []byte {
+	const hex = "0123456789abcdef"
+	b = append(b, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		if c := s[i]; c < utf8.RuneSelf {
+			if c >= ' ' && c != '"' && c != '\\' {
+				i++
+				continue
+			}
+			b = append(b, s[start:i]...)
+			switch c {
+			case '"', '\\':
+				b = append(b, '\\', c)
+			case '\b':
+				b = append(b, '\\', 'b')
+			case '\f':
+				b = append(b, '\\', 'f')
+			case '\n':
+				b = append(b, '\\', 'n')
+			case '\r':
+				b = append(b, '\\', 'r')
+			case '\t':
+				b = append(b, '\\', 't')
+			default:
+				b = append(b, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xf])
+			}
+			i++
+			start = i
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b = append(b, s[start:i]...)
+			b = append(b, `\ufffd`...)
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	return append(append(b, s[start:]...), '"')
+}
+
 // Decode parses JSON while retaining object property order. Well-formed JSON is read in one
 // pass; anything that pass is not sure of, malformed input included, is read by encoding/json
 // instead, so values and errors are the ones encoding/json gives.
-func Decode(data []byte) (any, error) {
-	p := parser{data: data, shallow: math.MaxInt}
+func Decode(data []byte) (any, error) { return decodeJSON(data, false) }
+
+// DecodeExact preserves numeric JSON spelling for tool arguments and retained/inline results.
+// Configuration and gateway control fields continue to use Decode's float64 values.
+func DecodeExact(data []byte) (any, error) { return decodeJSON(data, true) }
+
+// DecodeExactOwned is DecodeExact for data the caller owns and will not change: the strings
+// of the value it returns share data's memory instead of being copied out of it.
+func DecodeExactOwned(data []byte) (any, error) {
+	p := parser{data: data, exact: true, share: true}
 	if v, ok := p.value(0); ok {
 		p.space()
 		if p.at == len(data) {
 			return v, nil
 		}
 	}
-	return decodeTokens(data)
+	return decodeTokens(data, true)
 }
 
-// DecodeShallow parses like Decode, but leaves every object and array nested deeper than
-// depth as a json.RawMessage of its own text: checked to be well-formed, and not decoded. The
-// raw values share data's memory. It reports an error where Decode would ask encoding/json.
-func DecodeShallow(data []byte, depth int) (any, error) {
-	p := parser{data: data, shallow: depth}
+// decodeJSON shares ordered parsing while optionally retaining numbers as json.Number.
+func decodeJSON(data []byte, exact bool) (any, error) {
+	p := parser{data: data, exact: exact}
 	if v, ok := p.value(0); ok {
 		p.space()
 		if p.at == len(data) {
 			return v, nil
 		}
 	}
-	return nil, fmt.Errorf("JSON this pass does not read")
+	return decodeTokens(data, exact)
 }
 
 // parser reads JSON from a byte slice without a token stream. A method reports false when it
-// meets input it will not vouch for, and the caller abandons the pass. Objects and arrays
-// nested deeper than shallow are skipped and returned as their text.
+// meets input it will not vouch for, and the caller abandons the pass. With exact set, a
+// number keeps its spelling as a json.Number. With share set, strings are views of data.
 type parser struct {
-	data    []byte
-	at      int
-	shallow int
+	data         []byte
+	at           int
+	exact, share bool
+}
+
+// string returns data[from:to] as a string, a view of data when the parser shares it.
+func (p *parser) string(from, to int) string {
+	if p.share && to > from {
+		return unsafe.String(&p.data[from], to-from)
+	}
+	return string(p.data[from:to])
 }
 
 // space skips JSON whitespace.
@@ -175,12 +340,6 @@ func (p *parser) value(depth int) (any, bool) {
 		return nil, false
 	}
 	switch c := p.next(); {
-	case depth > p.shallow && (c == '{' || c == '['):
-		start := p.at
-		if !p.skip(depth) {
-			return nil, false
-		}
-		return json.RawMessage(p.data[start:p.at]), true
 	case c == '{':
 		p.at++
 		o := Object{}
@@ -249,53 +408,6 @@ func (p *parser) value(depth int) (any, bool) {
 	return nil, false
 }
 
-// skip passes over one value, checking it as value does without building it. A string with
-// an escape is checked by encoding/json.
-func (p *parser) skip(depth int) bool {
-	if depth > 1000 {
-		return false
-	}
-	switch c := p.next(); {
-	case c == '{' || c == '[':
-		end := c + 2
-		p.at++
-		if p.next() == end {
-			p.at++
-			return true
-		}
-		for {
-			if c == '{' {
-				if p.next() != '"' {
-					return false
-				}
-				if _, ok := p.span(); !ok || p.next() != ':' {
-					return false
-				}
-				p.at++
-			}
-			if !p.skip(depth + 1) {
-				return false
-			}
-			switch p.next() {
-			case ',':
-				p.at++
-			case end:
-				p.at++
-				return true
-			default:
-				return false
-			}
-		}
-	case c == '"':
-		_, ok := p.span()
-		return ok
-	case c == '-' || c >= '0' && c <= '9':
-		_, ok := p.number()
-		return ok
-	}
-	return p.word("true") || p.word("false") || p.word("null")
-}
-
 // span passes over a string that starts at the opening quote and reports whether it holds
 // an escape. One with a control character, invalid UTF-8 or a bad escape is not vouched for.
 func (p *parser) span() (escaped, ok bool) {
@@ -340,10 +452,10 @@ func (p *parser) text() (string, bool) {
 		err := json.Unmarshal(p.data[start-1:p.at], &s)
 		return s, err == nil
 	}
-	return string(p.data[start : p.at-1]), true
+	return p.string(start, p.at-1), true
 }
 
-// number reads a number in JSON's grammar as a float64, as encoding/json does.
+// number reads a number in JSON's grammar: a float64 as encoding/json gives, or its spelling.
 func (p *parser) number() (any, bool) {
 	start := p.at
 	digits := func() bool {
@@ -376,14 +488,20 @@ func (p *parser) number() (any, bool) {
 			return nil, false
 		}
 	}
+	if p.exact {
+		return json.Number(p.string(start, p.at)), true
+	}
 	n, err := strconv.ParseFloat(string(p.data[start:p.at]), 64)
 	return n, err == nil
 }
 
 // decodeTokens parses JSON through encoding/json's token stream. It is the reference for
 // Decode: slower, and the source of every error Decode reports.
-func decodeTokens(data []byte) (any, error) {
+func decodeTokens(data []byte, exact bool) (any, error) {
 	d := json.NewDecoder(bytes.NewReader(data))
+	if exact {
+		d.UseNumber()
+	}
 	v, err := decode(d)
 	if err != nil {
 		return nil, err

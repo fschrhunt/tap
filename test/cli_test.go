@@ -43,7 +43,11 @@ func TestCLI(t *testing.T) {
 	t.Run("list reports fixture tools", func(t *testing.T) {
 		b := sandbox(t)
 		output(t, b.run("add", "fixture", "--", fixtureBin, "--serve"))
-		equal(t, decode(t, output(t, b.run("list", "--json"))), map[string]any{"config": b.config, "integrations": []any{map[string]any{"server": "fixture", "tools": float64(3)}}})
+		r := decode(t, output(t, b.run("list", "--json"))).(map[string]any)
+		equal(t, r["config"], b.config)
+		row := r["integrations"].([]any)[0].(map[string]any)
+		equal(t, row["tools"], float64(3))
+		equal(t, row["availability"], "reachable")
 	})
 	for _, command := range []string{"list", "search", "call"} {
 		t.Run(command+" drains server stderr", func(t *testing.T) {
@@ -188,7 +192,7 @@ func TestLiteralUnicodeEscape(t *testing.T) {
 	equal(t, r["content"], []any{map[string]any{"type": "text", "text": `\u2028`}})
 }
 
-// TestHelp keeps the command and flag reference in sync with CLI help.
+// TestHelp pins the documented CLI surface, including scoped discovery and policy flags.
 func TestHelp(t *testing.T) {
 	data, err := os.ReadFile("testdata/help.txt")
 	if err != nil {
@@ -202,7 +206,11 @@ func TestDisconnectedServer(t *testing.T) {
 	b := sandbox(t)
 	b.write(map[string]any{"servers": map[string]any{"fixture": definition("--exit")}})
 	r := decode(t, output(t, b.run("list", "--json"))).(map[string]any)
-	equal(t, r["integrations"], []any{map[string]any{"server": "fixture", "tools": float64(0), "error": "Connection closed"}})
+	row := r["integrations"].([]any)[0].(map[string]any)
+	equal(t, row["server"], "fixture")
+	equal(t, row["tools"], float64(0))
+	equal(t, row["error"], "Connection closed")
+	equal(t, row["availability"], "not_checked")
 }
 
 // TestMisuseSaysWhatToTypeInstead pins how a wrongly called command answers: the mistake,
@@ -217,7 +225,7 @@ func TestMisuseSaysWhatToTypeInstead(t *testing.T) {
 		{[]string{"list", "--jsno"}, "list has no flag --jsno. Did you mean --json?"},
 		{[]string{"add", "docs", "https://example.invalid/mcp", "--bearer-token-env"}, "--bearer-token-env needs a value"},
 		{[]string{"add", "docs", "example.invalid"}, `"example.invalid" is not an http or https address`},
-		{[]string{"search"}, "search needs something to look for\n\nUsage: tap search QUERY... [--limit N] [--json]\nRun \"tap search --help\" for examples."},
+		{[]string{"search"}, "search needs something to look for, or --server to list one server's tools\n\nUsage: tap search QUERY... [--server NAME] [--limit N] [--json]\n       tap search --server NAME\nRun \"tap search --help\" for examples."},
 		{[]string{"call", "echo"}, `"echo" is not a tool id`},
 	} {
 		r := b.run(c.args...)

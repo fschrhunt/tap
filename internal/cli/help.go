@@ -39,13 +39,21 @@ var topics = []topic{
 			"tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes", "tap add db --env DATABASE_URL='${DATABASE_URL}' --cwd ~/code/app -- node mcp/server.mjs"},
 		flags: [][2]string{{"    --header KEY=VALUE", "send this header with every request; repeat for more"},
 			{"    --bearer-token-env VARIABLE", "send the token held in this environment variable"},
-			{"    --env KEY=VALUE", "set this variable for the command; repeat for more"}, {"    --cwd DIR", "start the command in this directory"}}},
+			{"    --env KEY=VALUE", "set this variable for the command; repeat for more"}, {"    --cwd DIR", "start the command in this directory"},
+			{"    --idle-timeout-ms N", "stop the command after this long unused; it starts again when needed"},
+			{"    --allow-tool PATTERN", "offer only the tools that match, such as read_*; repeat for more"},
+			{"    --deny-tool PATTERN", "never offer the tools that match; repeat for more"},
+			{"    --reference-to SERVER", "let results kept from this server be passed to that one; repeat for more"}}},
 	{name: "remove", group: "Servers", summary: "remove a server", page: "servers.md#adding-servers",
 		usage: []string{"tap remove NAME"}, about: "Removes a server from tap, with any sign-in saved for it.",
 		examples: []string{"tap remove docs"}},
 	{name: "list", group: "Servers", summary: "show the servers and how many tools each has", page: "cli.md",
-		usage: []string{"tap list [--json]"}, about: "Connects to every server and prints how many tools it offers, or why it could not be reached.",
-		examples: []string{"tap list", "tap list --json"}, flags: [][2]string{{"    --json", "print the servers as JSON"}}},
+		usage: []string{"tap list [--cached] [--json]"}, about: "Asks every server for its tools and prints how many it offers, or why it could not be reached.",
+		examples: []string{"tap list", "tap list --cached   # what tap last saw, without asking", "tap list --json"},
+		flags:    [][2]string{{"    --cached", "print the tool lists tap has saved, without asking the servers"}, {"    --json", "print the servers as JSON"}}},
+	{name: "refresh", group: "Servers", summary: "ask one server for its tools again", page: "cli.md#list",
+		usage: []string{"tap refresh [NAME] [--json]"}, about: "Asks one server, or all of them, for its tools again and saves what it answers.",
+		examples: []string{"tap refresh github", "tap refresh"}, flags: [][2]string{{"    --json", "print the servers as JSON"}}},
 	{name: "auth", group: "Servers", summary: "sign in to a server", page: "servers.md#signing-in",
 		usage: []string{"tap auth NAME [--client-id ID] [--port PORT] [--no-browser]", "tap auth NAME --remove"},
 		about: "Signs in to an HTTP server through your browser and saves the result, so your agents can\n" +
@@ -58,11 +66,19 @@ var topics = []topic{
 			{"-p, --port PORT", "the port your browser is sent back to on this machine"},
 			{"    --no-browser", "print the page's address instead of opening it"}, {"    --remove", "forget the sign-in"}}},
 	{name: "search", group: "Tools", summary: "find tools, the way your agent does", page: "cli.md#search",
-		usage: []string{"tap search QUERY... [--limit N] [--json]"},
-		about: "Prints the tools that match every word of the query, with the id to call each by.\n" +
-			"A word matches a tool's name, its server or its description.",
-		examples: []string{"tap search create issue", "tap search screenshot --limit 3", "tap search read file --json   # with input schemas, as an agent gets them"},
-		flags:    [][2]string{{"    --limit N", "how many tools to print (default 8)"}, {"    --json", "print the matches as JSON, with input schemas"}}},
+		usage: []string{"tap search QUERY... [--server NAME] [--limit N] [--json]", "tap search --server NAME"},
+		about: "Prints the tools that best match the query, with the id to call each by. Words are\n" +
+			"matched against a tool's name, its server, its description and its parameters. With\n" +
+			"--server and no query, it lists that server's tools.",
+		examples: []string{"tap search create issue", "tap search screenshot --limit 3", "tap search --server github", "tap search read file --json   # with input schemas, as an agent gets them"},
+		flags: [][2]string{{"    --server NAME", "look only in this server"}, {"    --limit N", "how many tools to print (default 8)"},
+			{"    --offset N", "skip this many matches, to continue a longer list"}, {"    --refresh", "ask the servers for their tools first"},
+			{"    --json", "print the matches as JSON, with input schemas"},
+			{"    --detail auto|full|summary", "with --json: whole schemas, or summaries (default full)"},
+			{"    --max-bytes N", "with --json: the most the answer may hold"}}},
+	{name: "inspect", group: "Tools", summary: "print one tool's whole contract", page: "cli.md#search",
+		usage: []string{"tap inspect SERVER.TOOL"}, about: "Prints a tool's description and its input and output schemas, as JSON.",
+		examples: []string{"tap inspect github.issue_write"}},
 	{name: "call", group: "Tools", summary: "call a tool", page: "cli.md#call",
 		usage: []string{"tap call SERVER.TOOL [KEY=VALUE]... [--args JSON] [--json]"},
 		about: "Calls a tool by the id that search prints. Give arguments as KEY=VALUE strings, as JSON\n" +
@@ -176,11 +192,12 @@ func full(w io.Writer, version string) {
 	fmt.Fprintln(w)
 	p.heading("Flags")
 	p.rows([][2]string{{"-h, --help", "show help for tap or for a command"}, {"    --version", "print the version"},
-		{"    --json", "print JSON instead of text (import, list, search, call)"},
+		{"    --json", "print JSON instead of text (import, list, refresh, search, call)"},
 		{"    --local", "use this machine's servers while a remote is selected"}})
 	fmt.Fprintln(w)
 	p.heading("Environment")
 	p.rows([][2]string{{"TAP_CONFIG", "the config file (default ~/.tap/servers.json)"}, {"TAP_DEADLINE_MS", "how long a server may take to connect and list its tools (default 5000)"},
+		{"TAP_REFERENCES", "set to on to let an agent keep large results as references"},
 		{"TAP_REMOTE_TOKEN", "the token a remote and its clients share"}, {"NO_COLOR", "set to print help without bold headings"}})
 	fmt.Fprintf(w, "\nRun \"tap COMMAND --help\" for a command's examples and flags.\nDocs:   %s\nIssues: %s\n", docs, issues)
 }

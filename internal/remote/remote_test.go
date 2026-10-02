@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/registry"
 	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -110,6 +112,80 @@ func TestExistingSessionAdoptsServers(t *testing.T) {
 	result, err = c.Listing(ctx, true)
 	if err != nil || len(result.Get("integrations").([]any)) != 0 {
 		t.Fatalf("removal: %v %v", result, err)
+	}
+}
+
+// TestReferenceSessionIsolation forbids inspect/drop/copy by a different authenticated session.
+func TestReferenceSessionIsolation(t *testing.T) {
+	t.Setenv("TAP_REFERENCES", "on")
+	fixture := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "test"}, nil)
+	fixture.AddTool(&mcp.Tool{Name: "echo", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "private result"}}}, nil
+	})
+	downstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return fixture }, nil))
+	t.Cleanup(downstream.Close)
+	h, c := host(t, false)
+	other, err := New(config.Remote{URL: h.URL, TokenEnv: "TAP_REMOTE_TOKEN"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(other.Close)
+	ctx := context.Background()
+	if _, err = c.Edit(ctx, "fixture", wire.Object{{Name: "url", Value: downstream.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.CallWithOptions(ctx, "fixture.echo", wire.Object{}, true, true, nil, nil)
+	if err != nil || r.Get("isError") == true {
+		t.Fatalf("retention: %v %v", r, err)
+	}
+	ref := r.Get("structuredContent").(wire.Object).Get("reference").(string)
+	if _, err = other.Inspect(ctx, ref, "/content/0/text", 0, 100, 32768); err == nil {
+		t.Fatal("other session inspected reference")
+	}
+	if _, err = other.Drop(ctx, ref); err == nil {
+		t.Fatal("other session dropped reference")
+	}
+	r, err = other.CallWithOptions(ctx, "fixture.echo", wire.Object{}, true, false, []registry.ArgumentReference{{Target: "/message", Reference: ref, Pointer: "/content/0/text"}}, nil)
+	if err != nil || r.Get("isError") != true || r.Get("structuredContent").(wire.Object).Get("code") != "reference_unavailable" {
+		t.Fatalf("cross-session copy: %v %v", r, err)
+	}
+	inspected, err := c.Inspect(ctx, ref, "/content/0/text", 0, 100, 32768)
+	if err != nil || inspected.Get("value") != "private result" {
+		t.Fatalf("owner inspection: %v %v", inspected, err)
+	}
+	if _, err = c.Drop(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestScopedRemoteDiscovery routes exact inspection and refresh without touching unrelated providers.
+func TestScopedRemoteDiscovery(t *testing.T) {
+	fixture := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "test"}, nil)
+	fixture.AddTool(&mcp.Tool{Name: "echo", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+	downstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return fixture }, nil))
+	t.Cleanup(downstream.Close)
+	var unrelatedHit atomic.Bool
+	unrelated := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { unrelatedHit.Store(true) }))
+	t.Cleanup(unrelated.Close)
+	_, c := host(t, false)
+	ctx := context.Background()
+	for name, url := range map[string]string{"fixture": downstream.URL, "unrelated": unrelated.URL} {
+		if _, err := c.Edit(ctx, name, wire.Object{{Name: "url", Value: url}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := c.Discover(ctx, registry.SearchOptions{IDs: []string{"fixture.echo"}, Detail: "full", Limit: 8, MaxBytes: 32768}, true)
+	if err != nil || r.Get("matches").([]any)[0].(wire.Object).Get("schemaLoaded") != true {
+		t.Fatalf("inspection: %v %v", r, err)
+	}
+	r, err = c.Refresh(ctx, "fixture", true)
+	if err != nil || len(r.Get("integrations").([]any)) != 1 || r.Has("config") {
+		t.Fatalf("refresh: %v %v", r, err)
+	}
+	if unrelatedHit.Load() {
+		t.Fatal("scoped discovery contacted unrelated provider")
 	}
 }
 

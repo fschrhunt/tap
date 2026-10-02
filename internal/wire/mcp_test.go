@@ -107,3 +107,32 @@ func TestCaptureResponseAndShutdown(t *testing.T) {
 		})
 	}
 }
+
+// TestTakeLeavesTheSDKAnEmptyResult pins that a taken response reaches the slot whole while
+// the SDK is given nothing to decode, and that an error response is passed on as it came.
+func TestTakeLeavesTheSDKAnEmptyResult(t *testing.T) {
+	base := &capturePeer{}
+	c := &capturingConnection{Connection: base, pending: map[jsonrpc.ID]*pendingCapture{}}
+	for i, tc := range []struct {
+		response jsonrpc.Response
+		raw, sdk string
+	}{
+		{jsonrpc.Response{Result: []byte(`{"tools":[{"name":"a"}]}`)}, `{"tools":[{"name":"a"}]}`, `{}`},
+		{jsonrpc.Response{Error: errors.New("refused")}, ``, ``},
+	} {
+		ctx, raw := Take(context.Background())
+		id, _ := jsonrpc.MakeID(float64(i))
+		if err := c.Write(ctx, &jsonrpc.Request{ID: id, Method: "tools/list"}); err != nil {
+			t.Fatal(err)
+		}
+		tc.response.ID = id
+		base.response = &tc.response
+		msg, err := c.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := msg.(*jsonrpc.Response); string(*raw) != tc.raw || string(got.Result) != tc.sdk || got.Error != tc.response.Error {
+			t.Errorf("slot %q, SDK result %q, error %v; want %q and %q", *raw, got.Result, got.Error, tc.raw, tc.sdk)
+		}
+	}
+}

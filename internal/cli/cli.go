@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -194,7 +195,10 @@ func (s *shell) run(args []string) (int, error) {
 			return 1, err
 		}
 		defer closer()
-		e.Grace = 250 * time.Millisecond
+		if backend == server.Backend(e) {
+			// The agent's first search usually comes a moment after it starts tap.
+			go e.Warm()
+		}
 		return 0, server.Serve(s.ctx, backend, e.Version)
 	}
 	if len(before) == 0 {
@@ -239,6 +243,10 @@ func (s *shell) run(args []string) (int, error) {
 		return s.remove(rest)
 	case "list":
 		return s.list(rest)
+	case "refresh":
+		return s.refresh(rest)
+	case "inspect":
+		return s.inspect(rest)
 	case "search":
 		return s.search(rest)
 	case "call":
@@ -296,6 +304,11 @@ func (s *shell) add(args, command []string, split bool) (int, error) {
 	fs.Var(&headers, "header", "")
 	cwd := fs.String("cwd", "", "")
 	bearer := fs.String("bearer-token-env", "", "")
+	var allow, deny, referenceTo repeated
+	fs.Var(&allow, "allow-tool", "")
+	fs.Var(&deny, "deny-tool", "")
+	fs.Var(&referenceTo, "reference-to", "")
+	idle := fs.Int("idle-timeout-ms", 0, "")
 	local := fs.Bool("local", false, "")
 	args, err := parse("add", fs, args)
 	if err != nil {
@@ -312,6 +325,30 @@ func (s *shell) add(args, command []string, split bool) (int, error) {
 	header, err := pairs("add", "header", headers)
 	if err != nil {
 		return 2, err
+	}
+	policy := wire.Object{}
+	for _, f := range []struct {
+		flag, key string
+		values    []string
+	}{{"allow-tool", "allow", allow}, {"deny-tool", "deny", deny}, {"reference-to", "referenceTo", referenceTo}} {
+		list := []any{}
+		for _, v := range f.values {
+			if v == "" {
+				return 2, wrong("add", "--%s needs a value", f.flag)
+			}
+			if _, err := path.Match(v, ""); err != nil && f.key != "referenceTo" {
+				return 2, wrong("add", "--%s takes a pattern like \"read_*\", and \"%s\" is not one", f.flag, v)
+			}
+			list = append(list, v)
+		}
+		if len(list) > 0 {
+			policy.Set(f.key, list)
+		}
+	}
+	idleSet := false
+	fs.Visit(func(f *flag.Flag) { idleSet = idleSet || f.Name == "idle-timeout-ms" })
+	if idleSet && (*idle < 1 || *idle > 86400000) {
+		return 2, wrong("add", "--idle-timeout-ms takes a number of milliseconds from 1 to 86400000")
 	}
 	var def wire.Object
 	kind := "http"
@@ -338,13 +375,16 @@ func (s *shell) add(args, command []string, split bool) (int, error) {
 		if *cwd != "" {
 			def.Set("cwd", *cwd)
 		}
+		if idleSet {
+			def.Set("idleTimeoutMs", *idle)
+		}
 	case len(args) == 2:
 		at, err := url.Parse(args[1])
 		if err != nil || at.Host == "" || (at.Scheme != "http" && at.Scheme != "https") {
 			return 2, wrong("add", "\"%s\" is not an http or https address. For a command, put it after --", args[1])
 		}
-		if len(env) > 0 || *cwd != "" {
-			return 2, wrong("add", "--env and --cwd are for a command, not an address")
+		if len(env) > 0 || *cwd != "" || idleSet {
+			return 2, wrong("add", "--env, --cwd and --idle-timeout-ms are for a command, not an address")
 		}
 		def = wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: args[1]}}
 		if len(header) > 0 {
@@ -357,6 +397,9 @@ func (s *shell) add(args, command []string, split bool) (int, error) {
 		return 2, wrong("add", "add needs the server's address, or its command after --")
 	default:
 		return 2, wrong("add", "add takes one address; \"%s\" is one too many. A command goes after --", args[2])
+	}
+	if len(policy) > 0 {
+		def.Set("policy", policy)
 	}
 	verb := "added"
 	backend, closer, err := s.backend(*local)
@@ -448,29 +491,45 @@ func tools(count any) string {
 	return wire.String(count) + " tools"
 }
 
-// settled asks again while an answer still rests on tools restored from disk, until each
-// server has either listed its tools afresh or failed to, so a person sees how things are
-// now. An agent's tap settles in the background; a command has only this one answer.
-func (s *shell) settled(ask func() (wire.Object, error), waiting func(wire.Object) bool) (wire.Object, error) {
-	give := time.Now().Add(10 * time.Second)
-	for {
-		result, err := ask()
-		if err != nil || !waiting(result) || time.Now().After(give) {
-			return result, err
+// rows prints each server with its tool count, or why it is unavailable.
+func (s *shell) rows(result wire.Object, backend server.Backend) {
+	rows := result.Get("integrations").([]any)
+	if len(rows) == 0 {
+		where := s.engine.Path
+		if _, relayed := backend.(*remote.Client); relayed {
+			where = "the remote"
 		}
-		select {
-		case <-s.ctx.Done():
-			return result, nil
-		case <-time.After(25 * time.Millisecond):
+		print(s.out, "No servers yet in "+where+".", false)
+		s.hint("Run \"tap import\" to bring over the ones your agents have, or \"tap add --help\" to add one.")
+		return
+	}
+	width := 0
+	for _, v := range rows {
+		width = max(width, len(wire.String(v.(wire.Object).Get("server"))))
+	}
+	for _, v := range rows {
+		row := v.(wire.Object)
+		summary := tools(row.Get("tools"))
+		switch {
+		case row.Has("error"):
+			summary = "unavailable: " + reason(wire.String(row.Get("error")))
+			if wire.String(row.Get("tools")) != "0" {
+				summary += " (" + tools(row.Get("tools")) + " when last reached)"
+			}
+		case row.Get("source") == "cache":
+			summary += " (as last listed; not checked now)"
 		}
+		fmt.Fprintf(s.out, "%-*s  %s\n", width, wire.String(row.Get("server")), summary)
 	}
 }
 
-// list shows every server with its tool count, or why it is unavailable.
+// list shows every server with its tool count, or why it is unavailable. It asks the servers,
+// so what it prints is how things are now; --cached prints what tap last saw without asking.
 func (s *shell) list(args []string) (int, error) {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	json := fs.Bool("json", false, "")
 	local := fs.Bool("local", false, "")
+	cached := fs.Bool("cached", false, "")
 	args, err := parse("list", fs, args)
 	if err != nil {
 		return 2, err
@@ -485,14 +544,11 @@ func (s *shell) list(args []string) (int, error) {
 	defer closer()
 	var result wire.Object
 	err = s.during("Asking the servers for their tools…", func() error {
-		result, err = s.settled(func() (wire.Object, error) { return backend.Listing(s.ctx, true) }, func(result wire.Object) bool {
-			for _, v := range result.Get("integrations").([]any) {
-				if row := v.(wire.Object); row.Get("stale") == true && !row.Has("error") {
-					return true
-				}
-			}
-			return false
-		})
+		if *cached {
+			result, err = backend.Listing(s.ctx, true)
+		} else {
+			result, err = backend.Refresh(s.ctx, "", true)
+		}
 		return err
 	})
 	if err != nil {
@@ -502,40 +558,88 @@ func (s *shell) list(args []string) (int, error) {
 		print(s.out, result, true)
 		return 0, nil
 	}
-	rows := result.Get("integrations").([]any)
-	if len(rows) == 0 {
-		where := s.engine.Path
-		if _, relayed := backend.(*remote.Client); relayed {
-			where = "the remote"
-		}
-		print(s.out, "No servers yet in "+where+".", false)
-		s.hint("Run \"tap import\" to bring over the ones your agents have, or \"tap add --help\" to add one.")
-		return 0, nil
-	}
-	width := 0
-	for _, v := range rows {
-		width = max(width, len(wire.String(v.(wire.Object).Get("server"))))
-	}
-	for _, v := range rows {
-		row := v.(wire.Object)
-		summary := tools(row.Get("tools"))
-		if row.Has("error") {
-			summary = "unavailable: " + reason(wire.String(row.Get("error")))
-			if row.Get("stale") == true {
-				summary += " (" + tools(row.Get("tools")) + " when last reached)"
-			}
-		}
-		fmt.Fprintf(s.out, "%-*s  %s\n", width, wire.String(row.Get("server")), summary)
-	}
+	s.rows(result, backend)
 	return 0, nil
 }
 
-// search prints the tools that match a query, as an agent would find them.
+// refresh asks one server, or all of them, for its tools again and prints what it found.
+func (s *shell) refresh(args []string) (int, error) {
+	fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
+	json := fs.Bool("json", false, "")
+	local := fs.Bool("local", false, "")
+	args, err := parse("refresh", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) > 1 {
+		return 2, wrong("refresh", "refresh takes the name of one server, or none for all of them")
+	}
+	name := ""
+	if len(args) == 1 {
+		name = args[0]
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	var result wire.Object
+	if err = s.during("Asking the servers for their tools…", func() error { result, err = backend.Refresh(s.ctx, name, true); return err }); err != nil {
+		return 1, err
+	}
+	if *json {
+		print(s.out, result, true)
+		return 0, nil
+	}
+	s.rows(result, backend)
+	return 0, nil
+}
+
+// inspect prints one tool's whole contract: its description and its schemas.
+func (s *shell) inspect(args []string) (int, error) {
+	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
+	local := fs.Bool("local", false, "")
+	fs.Bool("json", true, "")
+	args, err := parse("inspect", fs, args)
+	if err != nil {
+		return 2, err
+	}
+	if len(args) != 1 {
+		return 2, wrong("inspect", "inspect takes the id of one tool, as \"tap search\" prints it")
+	}
+	if dot := strings.Index(args[0], "."); dot < 1 || dot == len(args[0])-1 {
+		return 2, wrong("inspect", "\"%s\" is not a tool id. An id is server.tool, as \"tap search\" prints it", args[0])
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
+		return 1, err
+	}
+	defer closer()
+	var result wire.Object
+	err = s.during("Asking the server for the tool…", func() error {
+		result, err = backend.Discover(s.ctx, registry.SearchOptions{IDs: args, Detail: "full", Limit: 25, MaxBytes: 16777216}, true)
+		return err
+	})
+	if err != nil {
+		return 1, err
+	}
+	print(s.out, result, true)
+	return 0, nil
+}
+
+// search prints the tools that match a query, as an agent would find them, or every tool of
+// one server when only --server is given. It answers from the tool lists tap has saved, as an
+// agent's tap does; --refresh asks the servers first.
 func (s *shell) search(args []string) (int, error) {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	json := fs.Bool("json", false, "")
 	local := fs.Bool("local", false, "")
 	limit := fs.String("limit", "8", "")
+	only := fs.String("server", "", "")
+	detail := fs.String("detail", "full", "")
+	offset := fs.Int("offset", 0, "")
+	budget := fs.Int("max-bytes", 16777216, "")
+	refresh := fs.Bool("refresh", false, "")
 	args, err := parse("search", fs, args)
 	if err != nil {
 		return 2, err
@@ -544,9 +648,18 @@ func (s *shell) search(args []string) (int, error) {
 	if err != nil || count < 1 {
 		return 2, wrong("search", "--limit takes a whole number of at least 1, and \"%s\" is not one", *limit)
 	}
+	if *detail != "auto" && *detail != "full" && *detail != "summary" {
+		return 2, wrong("search", "--detail takes auto, full or summary")
+	}
+	if *offset < 0 || *offset > 1000000 {
+		return 2, wrong("search", "--offset takes a number from 0 to 1000000")
+	}
+	if *budget < 1024 || *budget > 16777216 {
+		return 2, wrong("search", "--max-bytes takes a number from 1024 to 16777216")
+	}
 	query := strings.TrimSpace(strings.Join(append(args, s.plain...), " "))
-	if query == "" {
-		return 2, wrong("search", "search needs something to look for")
+	if query == "" && *only == "" {
+		return 2, wrong("search", "search needs something to look for, or --server to list one server's tools")
 	}
 	backend, closer, err := s.backend(*local)
 	if err != nil {
@@ -555,19 +668,7 @@ func (s *shell) search(args []string) (int, error) {
 	defer closer()
 	var result wire.Object
 	err = s.during("Asking the servers for their tools…", func() error {
-		result, err = s.settled(func() (wire.Object, error) { return backend.Search(s.ctx, query, float64(count), true) }, func(result wire.Object) bool {
-			failed := map[string]bool{}
-			for _, v := range result.Get("unavailable").([]any) {
-				failed[wire.String(v.(wire.Object).Get("server"))] = true
-			}
-			for _, v := range result.Get("matches").([]any) {
-				id := wire.String(v.(wire.Object).Get("id"))
-				if v.(wire.Object).Get("stale") == true && !failed[id[:strings.Index(id, ".")]] {
-					return true
-				}
-			}
-			return false
-		})
+		result, err = backend.Discover(s.ctx, registry.SearchOptions{Query: query, Server: *only, Detail: *detail, Limit: float64(count), Offset: *offset, MaxBytes: *budget, Refresh: *refresh}, true)
 		return err
 	})
 	if err != nil {
@@ -579,27 +680,33 @@ func (s *shell) search(args []string) (int, error) {
 	}
 	matches := result.Get("matches").([]any)
 	lines := []string{}
+	saved := false
 	for _, v := range matches {
 		t := v.(wire.Object)
 		desc, _ := t.Get("description").(string)
-		id := wire.String(t.Get("id"))
-		if t.Get("stale") == true {
-			id += " (as last listed; its server is unavailable)"
-		}
-		lines = append(lines, strings.TrimRight(id+"\n  "+desc, " \t\r\n"))
+		saved = saved || t.Get("stale") == true
+		lines = append(lines, strings.TrimRight(wire.String(t.Get("id"))+"\n  "+desc, " \t\r\n"))
 	}
 	if len(lines) == 0 {
-		lines = append(lines, fmt.Sprintf("No tool matches every word of \"%s\". Try fewer words, or \"tap list\" for the servers.", query))
+		if query == "" {
+			lines = append(lines, *only+" lists no tools.")
+		} else {
+			lines = append(lines, fmt.Sprintf("No tool matches \"%s\". Try other words, or \"tap list\" for the servers.", query))
+		}
 	}
-	total := int(wire.Number(wire.String(result.Get("total"))))
-	if total > len(matches) {
-		lines = append(lines, fmt.Sprintf("(%d more; raise --limit to see them)", total-len(matches)))
+	if result.Has("nextOffset") {
+		next := int(wire.Number(wire.String(result.Get("nextOffset"))))
+		total := int(wire.Number(wire.String(result.Get("total"))))
+		lines = append(lines, fmt.Sprintf("(%d more; continue with --offset %d)", total-next, next))
 	}
 	for _, v := range result.Get("unavailable").([]any) {
 		row := v.(wire.Object)
 		lines = append(lines, wire.String(row.Get("server"))+" is unavailable: "+reason(wire.String(row.Get("error"))))
 	}
 	print(s.out, strings.Join(lines, "\n"), false)
+	if saved {
+		s.hint("These are from the tool lists tap saved. Add --refresh to ask the servers first.")
+	}
 	return 0, nil
 }
 
@@ -672,10 +779,11 @@ func (s *shell) call(args []string) (int, error) {
 }
 
 // toolArgs combines JSON arguments with KEY=VALUE strings, which replace the same keys.
+// Numbers in the JSON keep their spelling.
 func toolArgs(raw string, pairs []string) (any, error) {
 	var values any = wire.Object{}
 	if raw != "" {
-		v, err := wire.Decode([]byte(raw))
+		v, err := wire.DecodeExact([]byte(raw))
 		if err != nil {
 			return nil, wrong("call", "--args is not valid JSON: %s", config.JSONError([]byte(raw), err))
 		}

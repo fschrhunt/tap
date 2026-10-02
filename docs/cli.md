@@ -12,8 +12,10 @@ short introduction instead of waiting for an agent that is not there.
 | `tap add NAME -- COMMAND [ARGUMENT...]` | Add a stdio server |
 | `tap remove NAME` | Remove a server and its saved sign-in |
 | `tap list` | The servers and how many tools each has |
+| `tap refresh [NAME]` | Ask one server, or all of them, for its tools again |
 | `tap auth NAME` | Sign in to a server |
 | `tap search QUERY...` | Find tools, with what is needed to call them |
+| `tap inspect SERVER.TOOL` | Print one tool's whole contract |
 | `tap call SERVER.TOOL [KEY=VALUE]... [--args JSON]` | Call a tool |
 | `tap remote serve` | Host the registry over authenticated HTTP or HTTPS |
 | `tap remote use URL` | Select a remote for CLI commands and stdio relays |
@@ -40,14 +42,20 @@ Everything after `--` is taken as written: for `tap add`, it is the server's com
 | --- | --- | --- |
 | `-h`, `--help` | all | Show help |
 | `--version` | `tap` | Print the version |
-| `--json` | `import`, `list`, `search`, `call` | Print JSON instead of text |
-| `--local` | `import`, `add`, `remove`, `list`, `search`, `call`, `auth` | Use this machine's servers while a remote is selected |
+| `--json` | `import`, `list`, `refresh`, `search`, `call` | Print JSON instead of text |
+| `--local` | `import`, `add`, `remove`, `list`, `refresh`, `search`, `inspect`, `call`, `auth` | Use this machine's servers while a remote is selected |
+| `--cached` | `list` | Print the tool lists tap has saved, without asking the servers |
+| `--server NAME` | `search` | Look only in this server; with no query, list its tools |
 | `--limit N` | `search` | How many tools to print: a whole number of at least 1 (default 8) |
+| `--offset N` | `search` | Skip this many matches, to continue a longer list |
+| `--refresh` | `search` | Ask the servers for their tools first |
+| `--detail auto\|full\|summary` | `search` | With `--json`: whole schemas, or summaries (default `full`) |
+| `--max-bytes N` | `search` | With `--json`: the most the answer may hold |
 | `--args JSON` | `call` | The arguments as a JSON object; `-` reads standard input |
 | `-n`, `--dry-run` | `import` | Show what would be added and add nothing |
 | `-f`, `--force` | `import` | Replace servers tap already has under the same name |
 
-With a remote selected, `add`, `remove`, `list`, `search` and `call` use it; `--local` uses the
+With a remote selected, `add`, `remove`, `list`, `refresh`, `search`, `inspect` and `call` use it; `--local` uses the
 saved local registry. See [Remote](remote.md) for listener, TLS and authentication options.
 `path` still prints the local config file that stores the remote selection.
 
@@ -84,6 +92,15 @@ linear  unavailable: needs you to sign in: run "tap auth linear"
 docs    unavailable: its address could not be reached
 ```
 
+`tap list --cached` prints the tool lists tap has saved, without starting or asking any server:
+
+```text
+files   13 tools (as last listed; not checked now)
+```
+
+`tap refresh NAME` asks one server for its tools again and saves what it answers; with no name,
+it asks them all.
+
 ## Search
 
 ```sh
@@ -95,8 +112,11 @@ files.echo
   Echo the supplied message.
 ```
 
-Every term must match a tool's name, server, title or description. `--json` shows the input schema
-too, exactly what the agent gets:
+Words are matched against a tool's name, its server, its title and description, and its
+parameters. A query that is a tool's name or id finds that tool. Otherwise the tools that hold
+every word are printed, best first, and when none holds them all, the tools that hold any.
+`--server NAME` looks in one server only, and with no query lists that server's tools.
+`--json` shows the input schema too, as the agent gets it:
 
 ```sh
 tap search echo --json
@@ -115,16 +135,25 @@ tap search echo --json
         "properties": { "message": { "type": "string" } },
         "required": ["message"],
         "$schema": "https://json-schema.org/draft/2020-12/schema"
-      }
+      },
+      "schemaLoaded": true,
+      "stale": false
     }
   ],
-  "unavailable": []
+  "unavailable": [],
+  "catalogs": [
+    { "server": "files", "tools": 13, "source": "live", "observedAt": "2026-10-02T08:00:00Z", "availability": "reachable", "stale": false }
+  ]
 }
 ```
 
-`tap list` and `tap search` wait for each server to list its tools afresh, so what they print is
-how things are now. An agent's tap answers at once from the catalog it has saved and refreshes
-it in the background; see [How it works](how-it-works.md).
+`tap search`, like an agent's tap, answers at once from the tool lists tap has saved and
+refreshes them in the background; `stale: true` marks a match whose server has not answered
+since. `--refresh` waits for the servers first. `tap list` always asks them, so what it prints
+is how things are now. See [How it works](how-it-works.md).
+
+`tap inspect SERVER.TOOL` prints one tool's description and its input and output schemas as
+JSON, asking only the server that has it.
 
 ## Call
 

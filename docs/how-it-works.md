@@ -1,84 +1,165 @@
 # How it works
 
-## What the agent sees
+tap exposes two MCP tools, with no model or embedding service inside the gateway. Local
+initialization includes a bounded integration-name overview without starting downstream servers.
 
-An agent connected to tap loads two tools, whatever number of servers sit behind it:
+## Discover, browse, inspect
 
-- **`plugin_search`** finds tools. With a query, it returns matching tools as `server.tool` ids,
-  each with its description, input schema and safety hints, plus the total match count and any
-  server that could not be reached. With no query, it lists the configured servers.
-- **`plugin_call`** runs a tool by id with an arguments object. The tool's content, error flag,
-  structured content and result metadata are forwarded through the MCP SDK. Invalid values
-  such as `structuredContent: null` are not preserved.
+`plugin_search` supports capability search, server browsing, and exact inspection:
 
-A typical exchange:
-
-```text
-agent → plugin_search { "query": "create issue" }
-tap   ← { "matches": [{ "id": "issues.create", "inputSchema": {...} }], ... }
-agent → plugin_call { "tool": "issues.create", "arguments": { "title": "Login fails" } }
-tap   ← the issue server's own result
+```json
+{"query":"create github issue"}
+{"server":"github","detail":"summary","limit":8}
+{"ids":["github.create_issue"],"detail":"full"}
 ```
 
-The agent's context holds two short tool definitions instead of every tool's schema. It reads a
-schema only when it needs that tool.
+Without query/server/ids it lists integrations and upstream tool counts. Browsing and search
+respect allow/deny policy. Inspection only opens servers owning the requested ids. A query
+mentioning exactly one configured provider also scopes discovery there; ambiguous mentions do not.
 
-## Connections
+Ranking uses field-weighted BM25 over identifiers, providers, titles, descriptions and parameter
+names/descriptions/enum labels. Unicode tokenization, camelCase splitting, conservative English
+plural normalization, query filler removal and unique one-edit typo recovery reduce missed matches.
+A query that is a tool's name or id, word for word, returns the tools so named. Otherwise the
+tools holding every word of the query are returned, and when none does, the tools holding any.
+No index is built: each query reads the catalogs it is given, which takes under a millisecond for
+hundreds of tools and leaves nothing to prepare before the first search. Scores are not
+probabilities. Lexical retrieval cannot reliably infer semantic-only requests such as “notify the
+team”; browse or refine instead.
 
-- **Lazy startup.** tap connects to no downstream servers during initialization or `tools/list`.
-  A direct call opens only its target. A search needs the catalog from every configured server;
-  it is not selective downstream discovery.
-- **Deadline.** Connecting and listing tools share a 5-second deadline per server. A server that
-  misses it is reported as unavailable. Failed connections are temporarily backed off so one
-  dead server does not impose the full deadline on every subsequent search.
-  `TAP_DEADLINE_MS` changes the limit.
-- **Cache.** Tool catalogs are cached in memory and persisted privately for reuse across tap
-  processes. Expired catalogs remain searchable while tap refreshes them in the background;
-  they describe last-known tools, not a promise the server is currently available. Catalog
-  pagination is followed. For compatibility, the no-query catalog omits reachable servers
-  that expose no tools.
-  Stale catalog rows and matches carry `stale: true`; a failed refresh is also reported as
-  an error/unavailable server without discarding those matches. Fresh memory catalogs last
-  one minute. Restored disk catalogs answer the search that asked for them, and are always
-  revalidated in the background a quarter second later.
-- **Changes.** Additions are discovered on the next search. tap reads the config again
-  whenever the file's size or modification time has changed, or was modified in the last two
-  seconds. Changed or removed server definitions
-  invalidate their sessions and cached tools; a removed server cannot still be called through
-  an old resident connection.
-- **Resources.** Cold discovery is bounded rather than starting every connector at once. Idle
-  sessions are closed without forgetting their tool catalogs. Warm searches do not need a
-  downstream connection.
-- **Calls.** Tool execution has no fixed five-second timeout: long-running tools may legitimately
-  take longer. The caller's cancellation and shutdown end pending work. Tap does not automatically
-  replay a failed tool call, because it could have already performed a non-idempotent operation.
-- **Shutdown.** When the agent closes tap's stdin, tap closes every connection and exits.
+`detail` defaults to `auto`: include complete schemas when they fit `maxBytes` (default 32768),
+otherwise return labeled summaries with `schemaLoaded: false`. Inspect those ids with `detail: full`
+before calling. Full schemas are never truncated. Summaries omit schemas and clip long descriptions
+with `textTruncated: true`. Full views preserve output schemas and label initialization guidance as
+`untrusted_server_content`. Descriptions/guidance/results are data, not overriding instructions.
 
-tap is built on the official MCP Go SDK.
+`limit` defaults to 8 (1–25 over MCP); `offset` defaults to 0. Follow `nextOffset` for more results.
+Byte budgets are not token estimates; increase `maxBytes` up to 16777216 or scope discovery when
+metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults to full disclosure.
 
-The private index is `<config path>.tools.json` (mode `0600`); corrupt, public or
-definition-mismatched indexes are ignored. Removing it discards saved discovery
-data without changing connectors. Writes are coalesced and do not block searches.
-The index is optional when the config directory is not writable.
+## Connections and metadata
+
+- **Lazy startup:** initialization and tools/list open no downstream connections. While it
+  answers them, a serving tap reads its saved index, so the first search does not wait for it;
+  that starts no server. Scoped discovery
+  contacts no unrelated providers. Unscoped cold discovery contacts all selected providers, with
+  at most eight simultaneous connection/discovery operations. Calls open only their target.
+- **Budgets/backoff:** connection and paginated listing share a per-server deadline. Failed servers
+  back off rather than blocking every subsequent search. Tool execution itself has no fixed
+  five-second timeout; caller cancellation and shutdown still end work. No tool call is replayed.
+- **Resilient catalogs:** fresh memory catalogs last one minute. Expired and restored disk catalogs
+  remain searchable with `stale: true` during one shared background refresh. A failed refresh
+  reports diagnostics without discarding last-known tools. Disk catalogs always revalidate.
+  `refresh: true` waits for live discovery. Cached catalogs are not availability promises.
+- **Observability:** integration rows and `catalogs` report `source`, `observedAt`, and `availability`.
+  Cached rows use `availability: not_checked`; an unobserved timestamp may be zero for restored
+  indexes. Stale matches remain labeled even when a refresh has failed.
+- **Pagination:** tools/list follows at most 100 pages / 16 MiB; repeated cursors and duplicate or
+  empty tool names are refused. Tool-change notifications invalidate memory and queue index updates.
+- **Unchanged lists:** each catalog carries a SHA-256 digest of what its server answered. A
+  refresh that gets the same answer keeps the tools already decoded and writes nothing.
+- **Config changes:** each operation snapshots definitions and fingerprints together. Changed or
+  removed definitions retire their old sessions/catalogs; removed servers cannot still be called.
+  tap reads the config again whenever the file's size or modification time has changed, or it
+  was modified in the last two seconds.
+- **Persistence:** the private index is `<config path>.tools.json` (mode 0600), using symlink-safe
+  atomic replacement and coalesced writes outside discovery. It is JSON with one line per tool,
+  which lets tap find and decode the tools side by side. Corrupt, public, oversized,
+  definition-mismatched or differently laid out indexes are ignored. Removing it clears saved metadata, not connectors.
+  `TAP_CACHE_DIR=off` disables persistence. Unwritable index directories do not prevent tool use.
+  Fingerprints hash expanded connection inputs/credentials; stdio also includes working directory
+  and inherited environment. Connection definitions and credentials are not stored in the index.
+  Schemas/guidance may still contain sensitive metadata.
+- **Idle sessions:** unused downstream sessions close after five minutes. A stdio server may override it
+  with `idleTimeoutMs` (1–86400000). Active operations are never idle-stopped; later calls restart
+  the backend. Process-local state is lost. Set `TAP_IDLE_TTL_MS` appropriately for stateful servers.
+- **Shutdown:** EOF closes sessions, waits for workers and flushes queued index writes. References
+  are memory-only and disappear when the hosting process ends.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
 | `TAP_DEADLINE_MS` | `5000` | Per-server connect/list budget; not tool execution |
-| `TAP_FAIL_TTL_MS` | `5000` | Retry backoff after discovery/connect failure; `0` disables it |
+| `TAP_FAIL_TTL_MS` | `5000` | Discovery/connect retry backoff; `0` disables it |
 | `TAP_IDLE_TTL_MS` | `300000` | Close unused downstream sessions after five minutes |
+| `TAP_REFERENCES` | off | `on` offers [result references](#opt-in-result-references) to the agent |
 
-HTTP sessions use the SDK directly so negotiated protocol headers and idle tool-change
-notifications work. Stdio responses retain raw capture for compatibility. Application
-request/result metadata is forwarded; protocol identity and progress tokens belong to
-each hop and are not copied between them.
+HTTP sessions remain unwrapped so SDK protocol headers and idle notifications work. Stdio retains
+raw capture, and reads tool lists from it alone rather than decoding them twice. Application request/result metadata is forwarded; protocol identity and progress
+tokens belong to each hop and are never blindly copied between hops.
+
+## Validate and call
+
+```json
+{"tool":"github.create_issue","arguments":{"owner":"acme","repo":"app","title":"Login fails"}}
+```
+
+User-configured tool policy is checked before connecting. Calls require a successful catalog from
+the live calling session, not restored/stale descriptors. Complete input schemas are validated
+locally before tools/call: draft-07/2020-12 and local references work; remote schema fetching is
+disabled. Unsupported/malformed schemas fail closed. Tap does not coerce values, apply defaults or
+guess repairs. Common violations identify JSON Pointer fields without echoing argument values;
+complex violations request full-schema inspection. Backend semantic validity remains its responsibility.
+
+Gateway errors carry `structuredContent.code`, `message`, and `recovery`: `server_unavailable`,
+`catalog_unavailable`, `unknown_tool`, `invalid_arguments`, `schema_unavailable`, `permission_denied`,
+and `stale_schema` distinguish pre-call failures. A protocol/transport error after sending a call
+is `call_outcome_unknown`: a write may have happened. Verify external state before retrying.
+Tap **never automatically retries calls**, regardless of advertised idempotence.
+
+Default `resultMode: inline` forwards content, `_meta`, error flags and structured content through
+the SDK. Invalid explicit-null structured content is dropped. Backend tool-reported errors are
+preserved, not reclassified. Stdio preserves raw numeric spelling; HTTP retains SDK-supported fields.
+
+## Opt-in result references
+
+References are off unless `TAP_REFERENCES=on` is set where tap runs. Off, `plugin_call` offers
+only `tool` and `arguments`, which keeps the two definitions an agent loads near 300 tokens, and
+a call that uses a reference field is refused with `reference_unavailable` before anything is
+sent. On, `plugin_call` also describes the fields below.
+
+```json
+{"tool":"db.query","arguments":{"sql":"SELECT * FROM orders"},"resultMode":"reference"}
+{"operation":"inspect","reference":"REFERENCE","pointer":"/structuredContent/rows","offset":0,"limit":5}
+{"operation":"inspect","reference":"REFERENCE","pointer":"/content/0/text"}
+{"operation":"drop","reference":"REFERENCE"}
+```
+
+Reference mode returns a receipt (opaque reference, byte count, expiry, content types, original
+error flag), not an invented summary. Stdio retains complete raw result JSON, including images,
+error content and numeric precision; HTTP retains the SDK-decoded result. References are bound
+to the actual MCP session, including through authenticated remote relays; stateless HTTP callers
+must establish a session before using references. Another session cannot
+inspect, drop or copy them even if it learns an id. Memory limits apply across the hosting engine.
+
+Pointers follow RFC 6901 (`~1` for `/`, `~0` for `~`). Empty pointer selects the result root.
+Arrays page by index; objects page by sorted property name. Default limit is 100 (1–1000), default
+inspection budget is 32768 bytes. Oversized selections fail without truncation: choose a deeper
+pointer, smaller page or larger budget. Missing properties differ from JSON null.
+
+Explicit argument copies avoid model recitation:
+
+```json
+{"tool":"crm.import_records","arguments":{},"argumentRefs":[{"target":"/records","reference":"REFERENCE","pointer":"/structuredContent/rows"}]}
+```
+
+Targets cannot replace the argument root or overlap. Parent objects/arrays must exist; a final
+object property may be added. Ordinary argument markers are never implicitly interpreted. Copied
+values are schema-validated. Cross-server copies require the **source** server's `policy.referenceTo`
+grant; same-server copies remain subject to destination tool policy. See [Servers](servers.md).
+
+References expire after ten minutes and retain at most 128 entries / 32 MiB, evicting oldest entries.
+Results over 8 MiB fall back inline with an `_meta.tap` warning without changing execution success.
+Never repeat a write merely to recreate an expired reference. Inline remains the default because
+references add inspection turns and do not benefit every workload.
 
 ## Remote mode
 
-A [remote](remote.md) shares one registry, tool index and set of downstream sessions across agents
-and machines. Harnesses still launch `tap` over stdio and see the same two tools. Local tap relays
-to the remote lazily; connectors and credentials stay on the remote machine. Adding a connector
-there needs no harness configuration update or restart of an existing relay session.
+A [remote](remote.md) shares one registry, index and downstream sessions across agents/machines.
+Harnesses still launch tap over stdio and see two tools. The local relay connects lazily; connector
+credentials stay on the host. Additions need no harness restart. Discovery, inspection, refresh,
+validation and result operations use the remote backend, not a merged local/remote namespace.
+Local definitions remain available after remote off or CLI `--local`. Remote failures never silently
+fall back to local tools. Shared upstream credentials/sessions are not a multi-tenant sandbox.
 
-Remote mode uses the remote registry only, not a merged local/remote namespace. Local definitions
-remain saved for use after disabling the remote or with CLI `--local`. A remote failure is reported
-as an error, never silently redirected to local tools.
+tap uses Go and the official MCP SDK; it embeds neither LazyMCP nor an LLM/vector database/script
+runtime. It proxies tools, not every MCP feature (resources/prompts/sampling/elicitation).

@@ -678,21 +678,6 @@ func TestSettledConfigIsNotReadAgain(t *testing.T) {
 	}
 }
 
-// TestTokenize pins the words a query and a tool name are compared by.
-func TestTokenize(t *testing.T) {
-	for input, want := range map[string]string{
-		"getFileInfo":            "get file info",
-		"list_allowed-dirs v2":   "list allowed dirs v2",
-		"HTTPServer2Go API-post": "httpserver2 go api post",
-		"  Créer  ":              "cr er",
-		"":                       "",
-	} {
-		if got := strings.Join(tokenize(input), " "); got != want {
-			t.Errorf("tokenize(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
 // TestServerThatWantsASignInSaysHowToGiveIt pins what a search reports for an OAuth server
 // tap has no sign-in for.
 func TestServerThatWantsASignInSaysHowToGiveIt(t *testing.T) {
@@ -704,5 +689,38 @@ func TestServerThatWantsASignInSaysHowToGiveIt(t *testing.T) {
 	row := listing(t, testEngine(t, definitions(guarded.URL))).Get("integrations").([]any)[0].(wire.Object)
 	if got := wire.String(row.Get("error")); got != `needs you to sign in: run "tap auth test"` {
 		t.Fatalf("error = %q", got)
+	}
+}
+
+// TestUnchangedListKeepsCatalog pins the digest: a refresh that finds the list a server last
+// answered keeps the tools already decoded, and one that finds another list replaces them.
+func TestUnchangedListKeepsCatalog(t *testing.T) {
+	p := newPeer(t, nil)
+	e := testEngine(t, definitions(p.url))
+	listing(t, e)
+	snapshot, err := e.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := snapshot.servers.Get("test").(wire.Object)
+	refresh := func() []wire.Object {
+		t.Helper()
+		tools, err := e.liveTools(context.Background(), "test", def, snapshot.fingerprints["test"], true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tools
+	}
+	first, lists := refresh(), p.lists.Load()
+	again := refresh()
+	if p.lists.Load() == lists {
+		t.Fatal("the second refresh did not ask the server")
+	}
+	if &again[0] != &first[0] {
+		t.Fatal("an unchanged list was decoded again")
+	}
+	addTool(p.server, "second")
+	if changed := refresh(); len(changed) != 2 {
+		t.Fatalf("a changed list was not taken: %d tools", len(changed))
 	}
 }

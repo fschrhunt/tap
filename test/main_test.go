@@ -26,6 +26,9 @@ var tapBin, fixtureBin string
 
 // TestMain builds the gateway and fixture once for the entire black-box suite.
 func TestMain(m *testing.M) {
+	if os.Getenv("TAP_TEST_RACE") == "1" {
+		_ = os.Setenv("GORACE", os.Getenv("GORACE")+" atexit_sleep_ms=0")
+	}
 	dir, err := os.MkdirTemp("", "tap-test-bins-")
 	if err != nil {
 		panic(err)
@@ -33,7 +36,12 @@ func TestMain(m *testing.M) {
 	tapBin = filepath.Join(dir, "tap")
 	fixtureBin = filepath.Join(dir, "fixture")
 	for _, build := range [][2]string{{tapBin, "../cmd/tap"}, {fixtureBin, "./fixture"}} {
-		cmd := exec.Command("go", "build", "-o", build[0], build[1])
+		args := []string{"build"}
+		if os.Getenv("TAP_TEST_RACE") == "1" {
+			args = append(args, "-race")
+		}
+		args = append(args, "-o", build[0], build[1])
+		cmd := exec.Command("go", args...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "build: %s\n%v\n", out, err)
 			os.RemoveAll(dir)
@@ -66,7 +74,7 @@ func (b *box) run(args ...string) result {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tapBin, args...)
-	cmd.Env = append(os.Environ(), "TAP_CONFIG="+b.config, "TAP_DEADLINE_MS=500")
+	cmd.Env = append(os.Environ(), "TAP_CONFIG="+b.config, "TAP_DEADLINE_MS=500", "TAP_CACHE_DIR="+filepath.Join(filepath.Dir(b.config), "cache"))
 	var out, errout bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errout
@@ -191,7 +199,12 @@ func startRoot(t *testing.T, root map[string]any) *harness {
 	b.write(root)
 	h := &harness{t: t, config: b.config, replies: make(chan map[string]any, 32), done: make(chan error, 1)}
 	h.cmd = exec.Command(tapBin)
-	h.cmd.Env = append(os.Environ(), "TAP_CONFIG="+h.config, "TAP_DEADLINE_MS=500")
+	h.cmd.Env = append(os.Environ(), "TAP_CONFIG="+h.config, "TAP_DEADLINE_MS=500", "TAP_CACHE_DIR="+filepath.Join(filepath.Dir(h.config), "cache"))
+	// Result references are off unless asked for; the harness asks, since most of what it
+	// starts tests them. TestLeanSurface sets its own value.
+	if os.Getenv("TAP_REFERENCES") == "" {
+		h.cmd.Env = append(h.cmd.Env, "TAP_REFERENCES=on")
+	}
 	h.cmd.Stderr = &h.stderr
 	var err error
 	h.stdin, err = h.cmd.StdinPipe()
