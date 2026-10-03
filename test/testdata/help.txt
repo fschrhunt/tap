@@ -5,6 +5,7 @@ Usage
   tap COMMAND [ARGUMENT...] [FLAG...]  everything else
 
 Examples
+  tap connect
   tap import
   tap add docs https://docs.example.com/mcp
   tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes
@@ -13,6 +14,7 @@ Examples
   tap call files.read_text_file path=~/notes/todo.md
 
 Servers
+  connect  point your coding agents at tap
   import   bring over the servers your agents already have
   add      add a server
   remove   remove a server

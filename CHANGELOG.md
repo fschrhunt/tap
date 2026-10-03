@@ -55,6 +55,10 @@
   reached over SSH; `--client-id` covers providers that do not register clients. Sign-ins are
   kept in an owner-only file beside the config. A server waiting for one says so in `tap list`
   and in searches: `needs you to sign in: run "tap auth NAME"`.
+- `tap connect` points your coding agents at tap: it runs each agent's own command
+  (`claude mcp add`, `codex mcp add`, `opencode mcp add`) and reports each agent as
+  `connected`, or `has tap already` when its config has tap in it. With no name it connects
+  every agent it finds on this machine. Only the agent's own command writes the agent's config.
 - `tap import` adds the servers that Claude Code, Codex, OpenCode, Cursor and VS Code already
   have, or those in any config file you name. `--dry-run` shows what it would do. It only
   reads the agents' files.

@@ -7,6 +7,7 @@ short introduction instead of waiting for an agent that is not there.
 | Command | Does |
 | --- | --- |
 | `tap` | Serve MCP over stdio |
+| `tap connect [AGENT...]` | Point your coding agents at tap (see [Install](install.md)) |
 | `tap import [SOURCE...]` | Add the servers your agents already have (see [Servers](servers.md)) |
 | `tap add NAME URL` | Add an HTTP server |
 | `tap add NAME -- COMMAND [ARGUMENT...]` | Add a stdio server |
