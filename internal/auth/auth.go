@@ -9,7 +9,6 @@
 package auth
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -146,7 +145,9 @@ func Has(configPath, name, endpoint string) bool {
 	return err == nil && s.Servers[name] != nil && s.Servers[name].URL == endpoint
 }
 
-// Fingerprints hashes the owner-only store and each grant for session/catalog invalidation.
+// Fingerprints hashes the sign-in store and each grant's identity for session and catalog
+// invalidation. Tokens are deliberately excluded: a routine renewal must not invalidate
+// sessions or persisted catalogs, while sign-out and removal still change the set of grants.
 // Invalid stores fail closed; tokens and client secrets never leave as plaintext.
 func Fingerprints(configPath string) (string, map[string]string, error) {
 	s, err := read(Path(configPath))
@@ -155,7 +156,9 @@ func Fingerprints(configPath string) (string, map[string]string, error) {
 	}
 	grants := make(map[string]string, len(s.Servers))
 	for name, g := range s.Servers {
-		b, err := json.Marshal(g)
+		identity := *g
+		identity.Token = nil
+		b, err := json.Marshal(identity)
 		if err != nil {
 			return "", nil, err
 		}
@@ -272,9 +275,11 @@ type Options struct {
 	Port int
 	// Open shows the sign-in page to the person, usually by starting a browser. It may be nil.
 	Open func(page string) error
-	// Paste, when not nil, is read for the address the browser ended on, for a browser that
-	// cannot reach this machine's loopback address.
-	Paste io.Reader
+	// RedirectURL, AuthPage and Callback let a remote client host the browser callback while
+	// this process retains OAuth state, token exchange and credential storage.
+	RedirectURL string
+	AuthPage    chan<- string
+	Callback    <-chan url.Values
 	// Say receives what the person needs to read while they wait.
 	Say     io.Writer
 	Version string
@@ -283,37 +288,43 @@ type Options struct {
 // Result reports a sign-in: whether the server asked for one, and how many tools it lists now.
 type Result struct {
 	SignedIn bool
+	HadGrant bool
 	Tools    int
 }
 
 // Authorize connects to the server and, when it asks, signs in through the person's browser
 // and saves the result. It returns when the server has answered with its tools, or ctx ends.
 func Authorize(ctx context.Context, o Options) (*Result, error) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", o.Port))
-	if err != nil {
-		return nil, fmt.Errorf("cannot listen on 127.0.0.1:%d for the browser to come back to: %v", o.Port, err)
-	}
-	defer listener.Close()
-	redirect := fmt.Sprintf("http://127.0.0.1:%d/callback", listener.Addr().(*net.TCPAddr).Port)
+	redirect := o.RedirectURL
 	landed := make(chan url.Values, 1)
-	web := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/callback" {
-			http.NotFound(w, r)
-			return
+	if redirect == "" {
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", o.Port))
+		if err != nil {
+			return nil, fmt.Errorf("cannot listen on 127.0.0.1:%d for the browser to come back to: %v", o.Port, err)
 		}
-		message := "tap is signed in to " + o.Name + ". You can close this tab."
-		if r.URL.Query().Get("code") == "" {
-			message = "The sign-in did not finish. Go back to your terminal to see why."
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = io.WriteString(w, message+"\n")
-		select {
-		case landed <- r.URL.Query():
-		default:
-		}
-	})}
-	go func() { _ = web.Serve(listener) }()
-	defer web.Close()
+		defer listener.Close()
+		redirect = fmt.Sprintf("http://127.0.0.1:%d/callback", listener.Addr().(*net.TCPAddr).Port)
+		web := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/callback" {
+				http.NotFound(w, r)
+				return
+			}
+			message := "tap is signed in to " + o.Name + ". You can close this tab."
+			if r.URL.Query().Get("code") == "" {
+				message = "The sign-in did not finish. Go back to your terminal to see why."
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, message+"\n")
+			select {
+			case landed <- r.URL.Query():
+			default:
+			}
+		})}
+		go func() { _ = web.Serve(listener) }()
+		defer web.Close()
+	} else if o.Callback == nil || o.AuthPage == nil {
+		return nil, fmt.Errorf("remote sign-in requires a callback and authorization page channel")
+	}
 
 	path := Path(o.ConfigPath)
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -374,7 +385,7 @@ func Authorize(ctx context.Context, o Options) (*Result, error) {
 		return nil, explain(err, o)
 	}
 	defer session.Close()
-	result := &Result{SignedIn: signedIn}
+	result := &Result{SignedIn: signedIn, HadGrant: Has(o.ConfigPath, o.Name, o.Endpoint)}
 	for cursor := ""; ; {
 		page, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
@@ -387,35 +398,37 @@ func Authorize(ctx context.Context, o Options) (*Result, error) {
 	}
 }
 
-// fetch sends the person to the sign-in page and waits for the browser to come back, or for
-// the address it ended on to be pasted.
+// fetch presents the sign-in page and waits for the browser callback, locally or through the
+// selected remote client.
 func fetch(ctx context.Context, o Options, page string, landed <-chan url.Values) (*sdk.AuthorizationResult, error) {
+	if o.AuthPage != nil {
+		select {
+		case o.AuthPage <- page:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		select {
+		case query := <-o.Callback:
+			return authorizationResult(query)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	fmt.Fprintf(o.Say, "Open this page to sign in to %s:\n\n  %s\n\n", o.Name, page)
 	if o.Open != nil && o.Open(page) == nil {
-		fmt.Fprintln(o.Say, "It should have opened in your browser.")
-	}
-	pasted := make(chan url.Values, 1)
-	if o.Paste != nil {
-		fmt.Fprintln(o.Say, "If the browser is on another machine, sign in there and paste the address it ends on here.")
-		go func() {
-			lines := bufio.NewScanner(o.Paste)
-			for lines.Scan() {
-				if at, err := url.Parse(strings.TrimSpace(lines.Text())); err == nil && at.Query().Get("state") != "" {
-					pasted <- at.Query()
-					return
-				}
-				fmt.Fprintln(o.Say, "That is not the address the sign-in ended on. It starts with http://127.0.0.1 and has code= in it.")
-			}
-		}()
+		fmt.Fprintln(o.Say, "If a browser opened, finish signing in there.")
 	}
 	fmt.Fprintln(o.Say, "Waiting for you to finish in the browser. Ctrl-C stops waiting.")
 	var query url.Values
 	select {
 	case query = <-landed:
-	case query = <-pasted:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+	return authorizationResult(query)
+}
+
+func authorizationResult(query url.Values) (*sdk.AuthorizationResult, error) {
 	if refusal := query.Get("error"); refusal != "" {
 		if why := query.Get("error_description"); why != "" {
 			refusal += ": " + why

@@ -3,6 +3,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -25,11 +26,20 @@ func Path() string {
 	return filepath.Join(home, ".tap", "servers.json")
 }
 
-// Remote selects the relay endpoint and the environment variable holding its token.
+// Remote selects a legacy token endpoint or a paired device whose credential is loaded separately.
 type Remote struct {
 	URL           string `json:"url"`
 	TokenEnv      string `json:"tokenEnv"`
 	AllowInsecure bool   `json:"allowInsecure,omitempty"`
+	PeerID        string `json:"peerID,omitempty"`
+	Fingerprint   string `json:"fingerprint,omitempty"`
+	Token         string `json:"-"`
+}
+
+// RemoteProfileSet keeps named endpoints and the one selected for ordinary registry commands.
+type RemoteProfileSet struct {
+	Profiles map[string]Remote
+	Selected string
 }
 
 // NormalizeURL accepts a remote base URL or its /mcp endpoint, without credentials.
@@ -95,6 +105,11 @@ func loadRoot(path string) (wire.Object, error) {
 			return nil, err
 		}
 	}
+	if root.Has("remotes") || root.Has("selectedRemote") {
+		if _, err := remoteProfilesFrom(root); err != nil {
+			return nil, err
+		}
+	}
 	if err := checkSettings(root); err != nil {
 		return nil, err
 	}
@@ -112,15 +127,28 @@ func remoteFrom(v any) (*Remote, error) {
 	if !ok {
 		return nil, fmt.Errorf("config remote requires url")
 	}
-	r.TokenEnv = "TAP_REMOTE_TOKEN"
+	r.PeerID, _ = o.Get("peerID").(string)
+	r.Fingerprint, _ = o.Get("fingerprint").(string)
+	if r.PeerID == "" {
+		r.TokenEnv = "TAP_REMOTE_TOKEN"
+	}
 	if o.Has("tokenEnv") {
 		r.TokenEnv, ok = o.Get("tokenEnv").(string)
 		if !ok {
 			return nil, fmt.Errorf("invalid remote tokenEnv")
 		}
 	}
-	if !environmentName.MatchString(r.TokenEnv) {
+	if r.PeerID == "" && !environmentName.MatchString(r.TokenEnv) {
 		return nil, fmt.Errorf("invalid remote tokenEnv")
+	}
+	if r.PeerID != "" {
+		fingerprint, err := hex.DecodeString(r.Fingerprint)
+		if err != nil || len(fingerprint) != 32 {
+			return nil, fmt.Errorf("paired remote requires a SHA-256 certificate fingerprint")
+		}
+		if !strings.HasPrefix(r.URL, "https://") {
+			return nil, fmt.Errorf("paired remotes require HTTPS")
+		}
 	}
 	if o.Has("allowInsecure") {
 		r.AllowInsecure, ok = o.Get("allowInsecure").(bool)
@@ -134,11 +162,44 @@ func remoteFrom(v any) (*Remote, error) {
 		return nil, err
 	}
 	for _, f := range o {
-		if f.Name != "url" && f.Name != "tokenEnv" && f.Name != "allowInsecure" {
+		if f.Name != "url" && f.Name != "tokenEnv" && f.Name != "allowInsecure" && f.Name != "peerID" && f.Name != "fingerprint" {
 			return nil, fmt.Errorf("unknown remote config field")
 		}
 	}
 	return r, nil
+}
+
+func remoteProfilesFrom(root wire.Object) (RemoteProfileSet, error) {
+	set := RemoteProfileSet{Profiles: map[string]Remote{}}
+	if root.Has("remotes") {
+		profiles, ok := root.Get("remotes").(wire.Object)
+		if !ok {
+			return set, fmt.Errorf("config remotes must be an object")
+		}
+		for _, field := range profiles {
+			if field.Name == "" || strings.ContainsAny(field.Name, ". /\\") {
+				return set, fmt.Errorf("invalid remote profile name")
+			}
+			profile, err := remoteFrom(field.Value)
+			if err != nil {
+				return set, fmt.Errorf("remote %s: %w", field.Name, err)
+			}
+			set.Profiles[field.Name] = *profile
+		}
+	}
+	if root.Has("selectedRemote") {
+		selected, ok := root.Get("selectedRemote").(string)
+		if !ok {
+			return set, fmt.Errorf("config selectedRemote must be a string")
+		}
+		if selected != "" {
+			if _, ok := set.Profiles[selected]; !ok {
+				return set, fmt.Errorf("selected remote profile does not exist")
+			}
+		}
+		set.Selected = selected
+	}
+	return set, nil
 }
 
 // Load reads the local servers while validating the entire config.
@@ -156,10 +217,33 @@ func LoadRemote(path string) (*Remote, error) {
 	if err != nil {
 		return nil, err
 	}
+	profiles, err := remoteProfilesFrom(root)
+	if err != nil {
+		return nil, err
+	}
+	if profiles.Selected != "" {
+		profile := profiles.Profiles[profiles.Selected]
+		if profile.PeerID != "" {
+			profile.Token, err = LoadRemoteSecret(path, profile.PeerID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return &profile, nil
+	}
 	if !root.Has("remote") {
 		return nil, nil
 	}
 	return remoteFrom(root.Get("remote"))
+}
+
+// LoadRemoteProfiles reads named remote profiles and their selected default.
+func LoadRemoteProfiles(path string) (RemoteProfileSet, error) {
+	root, err := loadRoot(path)
+	if err != nil {
+		return RemoteProfileSet{}, err
+	}
+	return remoteProfilesFrom(root)
 }
 
 // edit serializes read-modify-write edits across processes using an advisory lock.
@@ -227,27 +311,130 @@ func SetRemote(path string, r *Remote) error {
 	return edit(path, func(root *wire.Object) error {
 		if r == nil {
 			root.Delete("remote")
+			root.Delete("selectedRemote")
 		} else {
 			root.Set("remote", value)
+			root.Delete("selectedRemote")
 		}
 		return nil
 	})
 }
 
+// SaveRemoteProfile adds or replaces a named endpoint without selecting it.
+func SaveRemoteProfile(path, name string, profile Remote) error {
+	if name == "" || strings.ContainsAny(name, ". /\\") {
+		return fmt.Errorf("invalid remote profile name")
+	}
+	b, _ := json.Marshal(profile)
+	value, err := wire.Decode(b)
+	if err != nil {
+		return fmt.Errorf("invalid remote profile")
+	}
+	if _, err := remoteFrom(value); err != nil {
+		return err
+	}
+	before, err := LoadRemoteProfiles(path)
+	if err != nil {
+		return err
+	}
+	err = edit(path, func(root *wire.Object) error {
+		profiles, _ := root.Get("remotes").(wire.Object)
+		profiles.Set(name, value)
+		root.Set("remotes", profiles)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if old := before.Profiles[name].PeerID; old != "" && old != profile.PeerID {
+		after, err := LoadRemoteProfiles(path)
+		if err != nil {
+			return err
+		}
+		used := false
+		for _, current := range after.Profiles {
+			used = used || current.PeerID == old
+		}
+		if !used {
+			return RemoveRemoteSecret(path, old)
+		}
+	}
+	return nil
+}
+
+// SelectRemoteProfile makes one named endpoint the default for registry commands.
+func SelectRemoteProfile(path, name string) error {
+	return edit(path, func(root *wire.Object) error {
+		if name == "" {
+			root.Delete("selectedRemote")
+			return nil
+		}
+		profiles, _ := root.Get("remotes").(wire.Object)
+		if !profiles.Has(name) {
+			return fmt.Errorf("there is no remote named %q", name)
+		}
+		root.Set("selectedRemote", name)
+		root.Delete("remote")
+		return nil
+	})
+}
+
+// RemoveRemoteProfile removes a saved endpoint and clears it if it was selected.
+func RemoveRemoteProfile(path, name string) (bool, error) {
+	removed := false
+	peerID := ""
+	err := edit(path, func(root *wire.Object) error {
+		profiles, _ := root.Get("remotes").(wire.Object)
+		removed = profiles.Has(name)
+		if profile, err := remoteFrom(profiles.Get(name)); err == nil {
+			peerID = profile.PeerID
+		}
+		profiles.Delete(name)
+		root.Set("remotes", profiles)
+		if root.Get("selectedRemote") == name {
+			root.Delete("selectedRemote")
+		}
+		return nil
+	})
+	if err == nil && peerID != "" {
+		profiles, loadErr := LoadRemoteProfiles(path)
+		if loadErr != nil {
+			return removed, loadErr
+		}
+		stillUsed := false
+		for _, profile := range profiles.Profiles {
+			stillUsed = stillUsed || profile.PeerID == peerID
+		}
+		if !stillUsed {
+			err = RemoveRemoteSecret(path, peerID)
+		}
+	}
+	return removed, err
+}
+
 // Add saves one server without losing concurrent edits or relay settings.
 func Add(path, name string, def wire.Object) error {
+	_, err := Put(path, name, def)
+	return err
+}
+
+// Put adds or replaces one server and reports whether the name already existed atomically.
+func Put(path, name string, def wire.Object) (bool, error) {
 	if name == "" {
-		return fmt.Errorf("server names cannot be empty")
+		return false, fmt.Errorf("server names cannot be empty")
 	}
 	if strings.Contains(name, ".") {
-		return fmt.Errorf("server names cannot contain a dot: tool ids use server.tool")
+		return false, fmt.Errorf("server names cannot contain a dot: tool ids use server.tool")
 	}
-	return edit(path, func(root *wire.Object) error {
+	replaced := false
+	err := edit(path, func(root *wire.Object) error {
 		servers := root.Get("servers").(wire.Object)
+		replaced = servers.Has(name)
 		servers.Set(name, def)
 		root.Set("servers", servers)
 		return nil
 	})
+	return replaced, err
 }
 
 // Remove deletes a named local server, reporting whether it existed.

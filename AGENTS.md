@@ -26,7 +26,8 @@ or modify a personal server config for tests.
 - `cmd/bench/` and `bench/`: frozen retrieval evaluation and recorded-ranking comparisons.
 - `internal/remote/`: authenticated HTTP hosting, remote administration and lazy client relay.
 - `internal/server/`: the two-tool MCP surface.
-- `internal/wire/`: ordered JSON and preservation of raw SDK responses.
+- `internal/human/`: terminal-safe writer that escapes control characters in text for people.
+- `internal/wire/`: ordered JSON, raw SDK response preservation, and inbound byte limits.
 - `test/fixture/`: local stdio/HTTP fixture with success, error, structured, noisy and hang modes.
 - `test/*_test.go`: black-box CLI and MCP tests with temporary configs.
 - `test/testdata/`: the CLI help snapshot.

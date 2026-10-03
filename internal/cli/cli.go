@@ -26,6 +26,7 @@ import (
 	"github.com/fschrhunt/tap/internal/agents"
 	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/human"
 	"github.com/fschrhunt/tap/internal/registry"
 	"github.com/fschrhunt/tap/internal/remote"
 	"github.com/fschrhunt/tap/internal/server"
@@ -48,6 +49,9 @@ type shell struct {
 	ctx         context.Context
 	engine      *registry.Engine
 	out, errOut io.Writer
+	// rawErr is errOut without escaping, for tap's own cursor controls, which must reach a
+	// terminal unmodified.
+	rawErr io.Writer
 	// watched is true when stderr is a terminal: hints and progress are for a person, and are
 	// left out of logs and pipes.
 	watched bool
@@ -65,7 +69,7 @@ func terminal(w any) bool {
 func Run(ctx context.Context, args []string, version string, stdout, stderr io.Writer) int {
 	e := registry.New(config.Path(), version)
 	defer e.Close()
-	s := &shell{ctx: ctx, engine: e, out: wire.HumanWriter{Writer: stdout}, errOut: wire.HumanWriter{Writer: stderr}, watched: terminal(stderr)}
+	s := &shell{ctx: ctx, engine: e, out: human.Writer{W: stdout}, errOut: human.Writer{W: stderr}, rawErr: stderr, watched: terminal(stderr)}
 	stderr = s.errOut
 	status, err := s.run(append([]string(nil), args...))
 	if err == nil {
@@ -106,9 +110,7 @@ func (s *shell) during(message string, work func() error) error {
 	err := work()
 	if !timer.Stop() {
 		<-shown
-		if human, ok := s.errOut.(wire.HumanWriter); ok {
-			fmt.Fprint(human.Writer, "\r\033[K")
-		}
+		fmt.Fprint(s.rawErr, "\r\033[K")
 	}
 	return err
 }
@@ -170,11 +172,8 @@ func pairs(command, name string, values []string) (wire.Object, error) {
 // print preserves JSON bytes for scripts and uses the human writer for terminal text.
 func print(w io.Writer, value any, json bool) {
 	if json {
-		if human, ok := w.(wire.HumanWriter); ok {
-			w = human.Writer
-		}
 		b, _ := wire.JSON(value, true)
-		fmt.Fprintln(w, string(b))
+		fmt.Fprintln(human.Raw(w), string(b))
 	} else {
 		fmt.Fprintln(w, value)
 	}
@@ -282,6 +281,11 @@ func (s *shell) config(args []string) (int, error) {
 	args, err := parse("config", fs, args)
 	if err != nil {
 		return 2, err
+	}
+	if cfg, err := config.LoadRemote(s.engine.Path); err != nil {
+		return 1, err
+	} else if cfg != nil {
+		s.hint("tap config always changes this local installation, not the selected remote (%s).", cfg.URL)
 	}
 	setting := func(name string) (config.Setting, error) {
 		found, ok := config.Find(name)
@@ -447,14 +451,30 @@ func (s *shell) backend(local bool) (server.Backend, func(), error) {
 			return nil, nil, err
 		}
 		if cfg != nil {
+			s.hint("Using selected %s.", selectedTarget(s.engine.Path))
 			relay, err := remote.New(*cfg, s.engine.Version)
 			if err != nil {
 				return nil, nil, err
 			}
 			return relay, relay.Close, nil
 		}
+	} else if cfg, err := config.LoadRemote(s.engine.Path); err != nil {
+		return nil, nil, err
+	} else if cfg != nil {
+		s.hint("Using this machine's local registry (--local).")
 	}
 	return s.engine, func() {}, nil
+}
+
+func selectedTarget(path string) string {
+	profiles, _ := config.LoadRemoteProfiles(path)
+	if profiles.Selected != "" {
+		return "remote " + profiles.Selected
+	}
+	if cfg, _ := config.LoadRemote(path); cfg != nil {
+		return "remote " + cfg.URL
+	}
+	return "local registry"
 }
 
 // add saves one server: an address for an HTTP server, or the command after -- for a stdio one.
@@ -563,24 +583,31 @@ func (s *shell) add(args, command []string, split bool) (int, error) {
 		def.Set("policy", policy)
 	}
 	verb := "added"
+	target := ""
 	backend, closer, err := s.backend(*local)
 	if err != nil {
 		return 1, err
 	}
 	defer closer()
 	if relay, ok := backend.(*remote.Client); ok {
-		if _, err = relay.Edit(s.ctx, name, def); err != nil {
-			return 1, err
+		changed, editErr := relay.Edit(s.ctx, name, def)
+		if editErr != nil {
+			return 1, editErr
 		}
-	} else {
-		if had, _ := config.Load(s.engine.Path); had.Has(name) {
+		if changed.Replaced {
 			verb = "replaced"
 		}
-		if err = config.Add(s.engine.Path, name, def); err != nil {
-			return 1, err
+		if cfg, _ := config.LoadRemote(s.engine.Path); cfg != nil {
+			target = " on " + selectedTarget(s.engine.Path)
+		}
+	} else {
+		if replaced, putErr := config.Put(s.engine.Path, name, def); putErr != nil {
+			return 1, putErr
+		} else if replaced {
+			verb = "replaced"
 		}
 	}
-	print(s.out, fmt.Sprintf("%s %s (%s)", verb, name, kind), false)
+	print(s.out, fmt.Sprintf("%s %s (%s)%s", verb, name, kind, target), false)
 	s.hint("Run \"tap list\" to check that it connects.")
 	return 0, nil
 }
@@ -603,7 +630,9 @@ func (s *shell) remove(args []string) (int, error) {
 	defer closer()
 	removed := false
 	if relay, ok := backend.(*remote.Client); ok {
-		removed, err = relay.Edit(s.ctx, args[0], nil)
+		var result remote.EditResult
+		result, err = relay.Edit(s.ctx, args[0], nil)
+		removed = result.Removed
 	} else {
 		if _, err = auth.Remove(s.engine.Path, args[0]); err == nil {
 			removed, err = config.Remove(s.engine.Path, args[0])
@@ -615,7 +644,11 @@ func (s *shell) remove(args []string) (int, error) {
 	if !removed {
 		return 1, fmt.Errorf("there is no server named \"%s\". Run \"tap list\" to see the ones there are", args[0])
 	}
-	print(s.out, "removed "+args[0], false)
+	target := ""
+	if cfg, _ := config.LoadRemote(s.engine.Path); cfg != nil {
+		target = " on " + selectedTarget(s.engine.Path)
+	}
+	print(s.out, "removed "+args[0]+target, false)
 	return 0, nil
 }
 
@@ -1313,10 +1346,44 @@ func (s *shell) auth(args []string) (int, error) {
 	if port < 0 || port > 65535 {
 		return 2, wrong("auth", "--port takes a port from 1 to 65535")
 	}
-	if remoteCfg, err := config.LoadRemote(s.engine.Path); err != nil {
+	secret := ""
+	if *secretFile != "" {
+		var b []byte
+		if *secretFile == "-" {
+			b, err = io.ReadAll(os.Stdin)
+		} else {
+			b, err = os.ReadFile(*secretFile)
+		}
+		if err != nil {
+			return 1, fmt.Errorf("cannot read the client secret from %s", *secretFile)
+		}
+		secret = strings.TrimSpace(string(b))
+	}
+	backend, closer, err := s.backend(*local)
+	if err != nil {
 		return 1, err
-	} else if remoteCfg != nil && !*local {
-		return 1, fmt.Errorf("a remote is selected, and a sign-in is kept on the machine that runs the server. Run \"tap auth %s\" there, or pass --local for this machine's servers", name)
+	}
+	defer closer()
+	if relay, ok := backend.(*remote.Client); ok {
+		if *forget {
+			removed, err := relay.AuthRemove(s.ctx, name)
+			if err != nil {
+				return 1, err
+			}
+			print(s.out, map[bool]string{true: "signed out of " + name, false: name + " had no sign-in"}[removed], false)
+			return 0, nil
+		}
+		ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
+		defer cancel()
+		var open func(string) error
+		if !*quiet {
+			open = browser
+		}
+		result, err := relay.Auth(ctx, name, *client, secret, port, open, s.errOut)
+		if err != nil {
+			return 1, err
+		}
+		return reportAuth(s, name, result, " on "+selectedTarget(s.engine.Path))
 	}
 	servers, err := config.Load(s.engine.Path)
 	if err != nil {
@@ -1338,19 +1405,6 @@ func (s *shell) auth(args []string) (int, error) {
 		print(s.out, map[bool]string{true: "signed out of " + name, false: name + " had no sign-in"}[removed], false)
 		return 0, nil
 	}
-	secret := ""
-	if *secretFile != "" {
-		var b []byte
-		if *secretFile == "-" {
-			b, err = io.ReadAll(os.Stdin)
-		} else {
-			b, err = os.ReadFile(*secretFile)
-		}
-		if err != nil {
-			return 1, fmt.Errorf("cannot read the client secret from %s", *secretFile)
-		}
-		secret = strings.TrimSpace(string(b))
-	}
 	o := auth.Options{ConfigPath: s.engine.Path, Name: name, Endpoint: endpoint, Headers: map[string][]string{}, ClientID: *client, ClientSecret: secret,
 		Port: port, Say: s.errOut, Version: s.engine.Version}
 	if h, ok := def.Get("headers").(wire.Object); ok {
@@ -1361,25 +1415,26 @@ func (s *shell) auth(args []string) (int, error) {
 	if !*quiet {
 		o.Open = browser
 	}
-	if terminal(os.Stdin) && *secretFile != "-" {
-		o.Paste = os.Stdin
-	}
-	had := auth.Has(s.engine.Path, name, endpoint)
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
 	defer cancel()
 	result, err := auth.Authorize(ctx, o)
 	if err != nil {
 		return 1, err
 	}
+	result.HadGrant = auth.Has(s.engine.Path, name, endpoint)
+	return reportAuth(s, name, result, "")
+}
+
+func reportAuth(s *shell, name string, result *auth.Result, target string) (int, error) {
 	switch {
 	case result.SignedIn:
-		print(s.out, fmt.Sprintf("signed in to %s (%s)", name, tools(result.Tools)), false)
+		print(s.out, fmt.Sprintf("signed in to %s (%s)%s", name, tools(result.Tools), target), false)
 		s.hint("Agents that are already running find its tools on their next search.")
-	case had:
-		print(s.out, fmt.Sprintf("%s is signed in already (%s)", name, tools(result.Tools)), false)
+	case result.HadGrant:
+		print(s.out, fmt.Sprintf("%s is signed in already (%s)%s", name, tools(result.Tools), target), false)
 		s.hint("To sign in as someone else, run \"tap auth %s --remove\" first.", name)
 	default:
-		print(s.out, fmt.Sprintf("%s did not ask for a sign-in (%s)", name, tools(result.Tools)), false)
+		print(s.out, fmt.Sprintf("%s did not ask for a sign-in (%s)%s", name, tools(result.Tools), target), false)
 	}
 	return 0, nil
 }
@@ -1397,6 +1452,8 @@ func (s *shell) remote(args []string) (int, error) {
 	key := fs.String("tls-key", "", "")
 	tokenEnv := fs.String("token-env", "TAP_REMOTE_TOKEN", "")
 	insecure := fs.Bool("allow-insecure", false, "")
+	check := fs.Bool("check", false, "")
+	role := fs.String("role", "execution", "")
 	args, err := parse("remote", fs, args)
 	if err != nil {
 		return 2, err
@@ -1406,10 +1463,93 @@ func (s *shell) remote(args []string) (int, error) {
 		if len(args) != 0 {
 			return 2, wrong("remote", "remote serve takes only flags; \"%s\" is not one", args[0])
 		}
+		s.hint("Serving this machine's local registry; the selected client remote is not used here.")
 		return 0, remote.Serve(s.ctx, path, version, remote.Options{Addr: *addr, TLSCert: *cert, TLSKey: *key, AllowInsecure: *insecure})
+	case "add":
+		if len(args) != 2 {
+			return 2, wrong("remote", "remote add takes a name and the remote's address")
+		}
+		endpoint, err := config.NormalizeURL(args[1], *insecure)
+		if err != nil {
+			return 1, err
+		}
+		if err := config.SaveRemoteProfile(path, args[0], config.Remote{URL: endpoint, TokenEnv: *tokenEnv, AllowInsecure: *insecure}); err != nil {
+			return 1, err
+		}
+		print(s.out, "saved remote "+args[0]+": "+endpoint, false)
+		s.hint("Select it with \"tap remote use %s\". It is not selected yet.", args[0])
+		return 0, nil
+	case "pair":
+		if len(args) != 2 {
+			return 2, wrong("remote", "remote pair takes a profile name and HTTPS address")
+		}
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return 1, fmt.Errorf("remote pair requires an interactive terminal")
+		}
+		if *role != "execution" && *role != "admin" {
+			return 2, wrong("remote", "--role must be execution or admin")
+		}
+		identity, err := remote.InspectPairing(s.ctx, args[1])
+		if err != nil {
+			return 1, err
+		}
+		fmt.Fprintf(s.errOut, "Remote %q (%s) presents TLS SHA-256 fingerprint:\n%s\nCompare this with the fingerprint shown on the serving machine before continuing.\nContinue? [y/N] ", identity.Name, identity.ID, identity.Fingerprint)
+		answer, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(s.errOut)
+		if err != nil || (strings.TrimSpace(string(answer)) != "y" && strings.TrimSpace(string(answer)) != "Y") {
+			return 1, fmt.Errorf("pairing cancelled")
+		}
+		fmt.Fprint(s.errOut, "Enter the one-time "+*role+" pairing code: ")
+		code, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(s.errOut)
+		if err != nil {
+			return 1, fmt.Errorf("cannot read pairing code")
+		}
+		endpoint, err := config.NormalizeURL(args[1], false)
+		if err != nil {
+			return 1, err
+		}
+		paired, err := remote.Pair(s.ctx, endpoint, identity.Fingerprint, strings.TrimSpace(string(code)), "tap on "+hostname(), *role)
+		if err != nil {
+			return 1, err
+		}
+		profile := config.Remote{URL: endpoint, PeerID: paired.ID, Fingerprint: identity.Fingerprint}
+		if err = config.SaveRemoteSecret(path, paired.ID, paired.Token); err != nil {
+			return 1, err
+		}
+		if err = config.SaveRemoteProfile(path, args[0], profile); err != nil {
+			_ = config.RemoveRemoteSecret(path, paired.ID)
+			return 1, err
+		}
+		if err = config.SelectRemoteProfile(path, args[0]); err != nil {
+			return 1, err
+		}
+		print(s.out, "paired and selected remote "+args[0]+" ("+*role+")", false)
+		return 0, nil
 	case "use":
 		if len(args) != 1 {
-			return 2, wrong("remote", "remote use takes the remote's address")
+			return 2, wrong("remote", "remote use takes a saved name or the remote's address")
+		}
+		profiles, err := config.LoadRemoteProfiles(path)
+		if err != nil {
+			return 1, err
+		}
+		if profile, ok := profiles.Profiles[args[0]]; ok {
+			if err := config.SelectRemoteProfile(path, args[0]); err != nil {
+				return 1, err
+			}
+			print(s.out, "selected remote "+args[0]+": "+profile.URL, false)
+			if profile.PeerID != "" {
+				s.hint("Paired device credentials are stored locally. Run \"tap remote status --check\" to verify reachability.")
+			} else if os.Getenv(profile.TokenEnv) == "" {
+				s.hint("%s is not set here. Set it before using tap.", profile.TokenEnv)
+			} else {
+				s.hint("Run \"tap list\" to see its servers.")
+			}
+			return 0, nil
+		}
+		if !strings.Contains(args[0], "://") {
+			return 1, fmt.Errorf("there is no saved remote named %q. Run \"tap remote list\"", args[0])
 		}
 		endpoint, err := config.NormalizeURL(args[0], *insecure)
 		if err != nil {
@@ -1418,7 +1558,7 @@ func (s *shell) remote(args []string) (int, error) {
 		if err = config.SetRemote(path, &config.Remote{URL: endpoint, TokenEnv: *tokenEnv, AllowInsecure: *insecure}); err != nil {
 			return 1, err
 		}
-		print(s.out, "remote configured: "+endpoint, false)
+		print(s.out, "selected one-off remote: "+endpoint, false)
 		if os.Getenv(*tokenEnv) == "" {
 			s.hint("%s is not set here. Set it to the remote's token before using tap.", *tokenEnv)
 		} else {
@@ -1434,6 +1574,78 @@ func (s *shell) remote(args []string) (int, error) {
 		}
 		print(s.out, "remote off", false)
 		return 0, nil
+	case "list":
+		if len(args) != 0 {
+			return 2, wrong("remote", "remote list takes no arguments")
+		}
+		profiles, err := config.LoadRemoteProfiles(path)
+		if err != nil {
+			return 1, err
+		}
+		names := make([]string, 0, len(profiles.Profiles))
+		for name := range profiles.Profiles {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			prefix := "- "
+			if name == profiles.Selected {
+				prefix = "* "
+			}
+			fmt.Fprintf(s.out, "%s%s  %s\n", prefix, name, profiles.Profiles[name].URL)
+		}
+		if cfg, _ := config.LoadRemote(path); cfg != nil && profiles.Selected == "" {
+			fmt.Fprintf(s.out, "* one-off  %s\n", cfg.URL)
+		}
+		if len(names) == 0 && profiles.Selected == "" {
+			if cfg, _ := config.LoadRemote(path); cfg != nil {
+				return 0, nil
+			}
+			print(s.out, "no saved remote profiles", false)
+		}
+		return 0, nil
+	case "remove":
+		if len(args) != 1 {
+			return 2, wrong("remote", "remote remove takes one saved remote name")
+		}
+		removed, err := config.RemoveRemoteProfile(path, args[0])
+		if err != nil {
+			return 1, err
+		}
+		if !removed {
+			return 1, fmt.Errorf("there is no saved remote named %q", args[0])
+		}
+		print(s.out, "removed remote "+args[0], false)
+		return 0, nil
+	case "devices":
+		if len(args) != 0 {
+			return 2, wrong("remote", "remote devices takes no arguments")
+		}
+		devices, err := remote.PairedDevices(path)
+		if err != nil {
+			return 1, err
+		}
+		if len(devices) == 0 {
+			print(s.out, "no paired devices", false)
+			return 0, nil
+		}
+		for _, device := range devices {
+			fmt.Fprintf(s.out, "%s  %s  (%s)\n", device.ID, device.Name, device.Role)
+		}
+		return 0, nil
+	case "revoke":
+		if len(args) != 1 {
+			return 2, wrong("remote", "remote revoke takes one device ID")
+		}
+		revoked, err := remote.RevokeDevice(path, args[0])
+		if err != nil {
+			return 1, err
+		}
+		if !revoked {
+			return 1, fmt.Errorf("there is no paired device %q", args[0])
+		}
+		print(s.out, "revoked paired device "+args[0], false)
+		return 0, nil
 	case "status":
 		if len(args) != 0 {
 			return 2, wrong("remote", "remote status takes no arguments")
@@ -1445,12 +1657,41 @@ func (s *shell) remote(args []string) (int, error) {
 		if cfg == nil {
 			print(s.out, "remote off", false)
 		} else {
-			print(s.out, "remote: "+cfg.URL+" (token env: "+cfg.TokenEnv+")", false)
+			profiles, _ := config.LoadRemoteProfiles(path)
+			name := profiles.Selected
+			label := "remote"
+			if name != "" {
+				label = "remote " + name
+			}
+			detail := "token env: " + cfg.TokenEnv
+			if cfg.PeerID != "" {
+				detail = "paired device credential"
+			}
+			print(s.out, label+": "+cfg.URL+" (configured; reachability not checked; "+detail+")", false)
+			if *check {
+				relay, err := remote.New(*cfg, version)
+				if err != nil {
+					return 1, err
+				}
+				defer relay.Close()
+				if err = relay.Health(s.ctx); err != nil {
+					return 1, err
+				}
+				print(s.out, label+" reachable", false)
+			}
 		}
 		return 0, nil
 	}
-	if meant := nearest(command, []string{"serve", "use", "off", "status"}); meant != "" {
+	if meant := nearest(command, []string{"serve", "add", "pair", "use", "list", "remove", "devices", "revoke", "off", "status"}); meant != "" {
 		return 2, wrong("remote", "remote has no \"%s\". Did you mean \"%s\"?", command, meant)
 	}
-	return 2, wrong("remote", "remote has no \"%s\"; it has serve, use, off and status", command)
+	return 2, wrong("remote", "remote has no \"%s\"; it has serve, add, pair, use, list, remove, devices, revoke, off and status", command)
+}
+
+func hostname() string {
+	name, err := os.Hostname()
+	if err != nil || name == "" {
+		return "device"
+	}
+	return name
 }

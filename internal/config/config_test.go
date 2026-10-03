@@ -41,6 +41,58 @@ func TestConcurrentEdits(t *testing.T) {
 	}
 }
 
+// TestNamedRemoteProfilesSelectWithoutDiscardingOthers pins named-target lifecycle.
+func TestNamedRemoteProfilesSelectWithoutDiscardingOthers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for name, host := range map[string]string{"home": "home.example", "work": "work.example"} {
+		if err := SaveRemoteProfile(path, name, Remote{URL: "https://" + host, TokenEnv: "REMOTE_TOKEN"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SelectRemoteProfile(path, "work"); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := LoadRemote(path)
+	if err != nil || selected == nil || selected.URL != "https://work.example/mcp" {
+		t.Fatalf("selected remote = %+v, %v", selected, err)
+	}
+	profiles, err := LoadRemoteProfiles(path)
+	if err != nil || profiles.Selected != "work" || len(profiles.Profiles) != 2 {
+		t.Fatalf("profiles = %+v, %v", profiles, err)
+	}
+	if removed, err := RemoveRemoteProfile(path, "work"); err != nil || !removed {
+		t.Fatalf("remove selected = %v, %v", removed, err)
+	}
+	selected, err = LoadRemote(path)
+	if err != nil || selected != nil {
+		t.Fatalf("selected after removing active profile = %+v, %v", selected, err)
+	}
+	profiles, err = LoadRemoteProfiles(path)
+	if err != nil || len(profiles.Profiles) != 1 || profiles.Profiles["home"].URL != "https://home.example/mcp" {
+		t.Fatalf("remaining profiles = %+v, %v", profiles, err)
+	}
+}
+
+// TestRemoteCredentialSidecarKeepsPairedTokensPrivate pins the paired-secret storage contract.
+func TestRemoteCredentialSidecarKeepsPairedTokensPrivate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "servers.json")
+	if err := SaveRemoteSecret(path, "device-1", "secret-token"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadRemoteSecret(path, "device-1")
+	if err != nil || got != "secret-token" {
+		t.Fatalf("LoadRemoteSecret = %q, %v", got, err)
+	}
+	info, err := os.Stat(remoteSecretsPath(path))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("secret sidecar mode = %v, %v", info, err)
+	}
+	config, err := os.ReadFile(path)
+	if err == nil || strings.Contains(string(config), "secret-token") {
+		t.Fatalf("token leaked to server config: %s (%v)", config, err)
+	}
+}
+
 // TestInvalidConfigFailsClosed protects malformed roots from destructive edits.
 func TestInvalidConfigFailsClosed(t *testing.T) {
 	for _, input := range []string{`[]`, `{"servers":null}`, `{"servers":{"x":null}}`, `{"remote":null}`, `{"remote":{"url":"https://example.com","allowInsecure":"yes"}}`, `{"remote":{"url":"http://example.com"}}`} {

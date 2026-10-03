@@ -10,6 +10,11 @@ import (
 // MaxMessageBytes bounds downstream JSON bodies, stdio frames and SSE events before decoding.
 const MaxMessageBytes = 16 << 20
 
+// tooLarge reports a message that meets the shared byte limit, in the unit the docs use.
+func tooLarge(what string) error {
+	return fmt.Errorf("%s exceeds %d MiB", what, MaxMessageBytes>>20)
+}
+
 // BoundResponse limits bodies before SDK buffering, including error responses that
 // claim to be SSE. Only HTTP 200 SSE streams use the SDK's per-event MaxEventSize.
 func BoundResponse(resp *http.Response, err error) (*http.Response, error) {
@@ -20,7 +25,7 @@ func BoundResponse(resp *http.Response, err error) (*http.Response, error) {
 	if typ != "text/event-stream" || resp.StatusCode != http.StatusOK {
 		if resp.ContentLength > MaxMessageBytes {
 			resp.Body.Close()
-			return nil, fmt.Errorf("downstream response exceeds 16 MiB")
+			return nil, tooLarge("downstream response")
 		}
 		resp.Body = &boundedBody{ReadCloser: resp.Body, remaining: MaxMessageBytes}
 	}
@@ -42,7 +47,7 @@ func (b *boundedBody) Read(p []byte) (int, error) {
 		var probe [1]byte
 		n, err := b.ReadCloser.Read(probe[:])
 		if n > 0 {
-			return 0, fmt.Errorf("downstream response exceeds 16 MiB")
+			return 0, tooLarge("downstream response")
 		}
 		return 0, err
 	}

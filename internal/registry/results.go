@@ -20,6 +20,12 @@ const resultTTL = 10 * time.Minute
 const maxResultBytes = 8 << 20
 const maxStoredBytes = 32 << 20
 
+// Argument-expansion limits. Distinct from the result-retention bounds above: they cap what
+// one call's arguments may become after copies are attached.
+const maxArgumentRefs = 128
+const maxExpandedArgumentBytes = 8 << 20
+const maxDecodedSourceBytes = 32 << 20
+
 // resultStore keeps bounded, session-only results; opaque references are never persisted.
 type resultStore struct {
 	mu      sync.Mutex
@@ -266,8 +272,8 @@ func (e *Engine) resolveReferences(ctx context.Context, target string, args any,
 	if err != nil {
 		return nil, err
 	}
-	if len(refs) > 128 || len(b) > maxResultBytes {
-		return nil, &Failure{"arguments_too_large", "argument expansion exceeds 128 references or 8 MiB", "Use fewer references or smaller arguments."}
+	if len(refs) > maxArgumentRefs || len(b) > maxExpandedArgumentBytes {
+		return nil, &Failure{"arguments_too_large", fmt.Sprintf("argument expansion exceeds %d references or %d MiB", maxArgumentRefs, maxExpandedArgumentBytes>>20), "Use fewer references or smaller arguments."}
 	}
 	expanded := len(b)
 	decoded := map[string]any{}
@@ -304,8 +310,8 @@ func (e *Engine) resolveReferences(ctx context.Context, target string, args any,
 		}
 		value, loaded := decoded[ref.Reference]
 		if !loaded {
-			if len(stored.raw) > maxStoredBytes-decodedBytes {
-				return nil, &Failure{"arguments_too_large", "referenced source data exceeds 32 MiB", "Use fewer retained results."}
+			if len(stored.raw) > maxDecodedSourceBytes-decodedBytes {
+				return nil, &Failure{"arguments_too_large", fmt.Sprintf("referenced source data exceeds %d MiB", maxDecodedSourceBytes>>20), "Use fewer retained results."}
 			}
 			value, err = decodeResult(stored.raw)
 			if err != nil {
@@ -326,8 +332,8 @@ func (e *Engine) resolveReferences(ctx context.Context, target string, args any,
 		if err != nil {
 			return nil, err
 		}
-		if len(selected)+len(targetBytes)+2 > maxResultBytes-expanded {
-			return nil, &Failure{"arguments_too_large", "expanded arguments exceed 8 MiB", "Select smaller values or use fewer references."}
+		if len(selected)+len(targetBytes)+2 > maxExpandedArgumentBytes-expanded {
+			return nil, &Failure{"arguments_too_large", fmt.Sprintf("expanded arguments exceed %d MiB", maxExpandedArgumentBytes>>20), "Select smaller values or use fewer references."}
 		}
 		expanded += len(selected) + len(targetBytes) + 2
 		// Detach the selected value: later target assignments must not mutate the decoded source.

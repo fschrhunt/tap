@@ -13,6 +13,16 @@
 - Bound searches to 4096 query bytes, 32 distinct terms and 65536 candidate tools.
 - Escape terminal controls in human CLI output, diagnostics and downstream stderr.
 - Bound reference expansion to 128 copies / 8 MiB arguments and decode each source once.
+- `tap auth` follows the selected registry. For a remote sign-in, the browser callback is
+  relayed automatically while OAuth exchange and grant storage stay on the serving machine;
+  immediate/no-OAuth sign-ins return normally, and `--local` explicitly targets this machine's registry.
+- Save several named remote profiles, select one without losing the others, and optionally
+  check reachability with `tap remote status --check`. CLI output identifies the selected
+  target; `tap config` explicitly remains local.
+- Remote `tap add` now reports whether it replaced an existing shared server definition.
+- `tap remote serve` can enroll devices over TLS with a manually verified certificate
+  fingerprint, one-time role-scoped codes, per-device revocation and optional mDNS
+  discovery. Paired-device credentials stay in owner-only files; token mode remains available.
 
 ## v1.0.2 · 2026-10-02
 

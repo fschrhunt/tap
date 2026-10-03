@@ -2,12 +2,15 @@ package remote
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
 	"github.com/fschrhunt/tap/internal/registry"
 	"github.com/fschrhunt/tap/internal/wire"
@@ -45,6 +49,130 @@ func host(t *testing.T, tls bool) (*httptest.Server, *Client) {
 	return httpServer, c
 }
 
+// oauthProvider is an offline MCP OAuth service used to verify the complete remote callback relay.
+func oauthProvider(t *testing.T) *httptest.Server {
+	t.Helper()
+	var provider *httptest.Server
+	tools := mcp.NewServer(&mcp.Implementation{Name: "oauth-fixture", Version: "test"}, nil)
+	mcp.AddTool(tools, &mcp.Tool{Name: "whoami"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{}, nil, nil
+	})
+	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return tools }, nil)
+	mux := http.NewServeMux()
+	provider = httptest.NewServer(mux)
+	t.Cleanup(provider.Close)
+	jsonReply := func(w http.ResponseWriter, value any) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(value)
+	}
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer remote-oauth-token" {
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+provider.URL+`/.well-known/oauth-protected-resource"`)
+			http.Error(w, "sign in first", http.StatusUnauthorized)
+			return
+		}
+		stream.ServeHTTP(w, r)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		jsonReply(w, map[string]any{"resource": provider.URL + "/mcp", "authorization_servers": []string{provider.URL}})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		jsonReply(w, map[string]any{"issuer": provider.URL, "authorization_endpoint": provider.URL + "/authorize", "token_endpoint": provider.URL + "/token",
+			"registration_endpoint": provider.URL + "/register", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token"},
+			"code_challenge_methods_supported": []string{"S256"}, "token_endpoint_auth_methods_supported": []string{"none"}})
+	})
+	mux.HandleFunc("/register", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		jsonReply(w, map[string]string{"client_id": "test-client"})
+	})
+	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		http.Redirect(w, r, q.Get("redirect_uri")+"?code=test-code&state="+url.QueryEscape(q.Get("state")), http.StatusFound)
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		jsonReply(w, map[string]any{"access_token": "remote-oauth-token", "token_type": "Bearer", "refresh_token": "refresh", "expires_in": 3600})
+	})
+	return provider
+}
+
+// TestRemoteAuthRelaysBrowserCallback verifies that the browser stays on the client while the
+// remote performs OAuth and writes its own private grant store.
+func TestRemoteAuthRelaysBrowserCallback(t *testing.T) {
+	provider := oauthProvider(t)
+	path := filepath.Join(t.TempDir(), "servers.json")
+	if err := config.Add(path, "oauth", wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: provider.URL + "/mcp"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TAP_REMOTE_TOKEN", "relay")
+	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "admin")
+	h, cleanup, err := Handler(path, "test", "relay", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosted := httptest.NewServer(h)
+	t.Cleanup(func() { hosted.Close(); cleanup() })
+	c, err := New(config.Remote{URL: hosted.URL, TokenEnv: "TAP_REMOTE_TOKEN", AllowInsecure: true}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	result, err := c.Auth(ctx, "oauth", "", "", 0, func(page string) error {
+		resp, err := http.Get(page)
+		if err != nil {
+			return err
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.Body.Close()
+	}, io.Discard)
+	if err != nil || result == nil || !result.SignedIn || !result.HadGrant || result.Tools != 1 {
+		t.Fatalf("remote Auth = %+v, %v", result, err)
+	}
+	if !auth.Has(path, "oauth", provider.URL+"/mcp") {
+		t.Fatal("remote grant was not saved on the serving machine")
+	}
+	result, err = c.Auth(ctx, "oauth", "", "", 0, func(string) error {
+		return errors.New("already-authorized flow unexpectedly opened a browser")
+	}, io.Discard)
+	if err != nil || result == nil || result.SignedIn || !result.HadGrant || result.Tools != 1 {
+		t.Fatalf("repeat remote Auth = %+v, %v; want completed without a browser", result, err)
+	}
+}
+
+// TestRemoteAuthWithoutOAuthReturnsAnImmediateResult pins providers that do not challenge.
+func TestRemoteAuthWithoutOAuthReturnsAnImmediateResult(t *testing.T) {
+	tools := mcp.NewServer(&mcp.Implementation{Name: "plain", Version: "test"}, nil)
+	mcp.AddTool(tools, &mcp.Tool{Name: "ping"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{}, nil, nil
+	})
+	downstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return tools }, nil))
+	t.Cleanup(downstream.Close)
+	path := filepath.Join(t.TempDir(), "servers.json")
+	if err := config.Add(path, "plain", wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: downstream.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TAP_REMOTE_TOKEN", "relay")
+	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "admin")
+	h, cleanup, err := Handler(path, "test", "relay", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosted := httptest.NewServer(h)
+	t.Cleanup(func() { hosted.Close(); cleanup() })
+	c, err := New(config.Remote{URL: hosted.URL, TokenEnv: "TAP_REMOTE_TOKEN", AllowInsecure: true}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := c.Auth(ctx, "plain", "", "", 0, nil, io.Discard)
+	if err != nil || result == nil || result.SignedIn || result.HadGrant || result.Tools != 1 {
+		t.Fatalf("remote Auth without OAuth = %+v, %v", result, err)
+	}
+}
+
 // TestAuthenticationAndOrigins protects every endpoint and keeps server definitions write-only.
 func TestAuthenticationAndOrigins(t *testing.T) {
 	h, close, err := Handler(filepath.Join(t.TempDir(), "config.json"), "test", "relay", "admin")
@@ -56,7 +184,10 @@ func TestAuthenticationAndOrigins(t *testing.T) {
 		path, token, origin, method string
 		status                      int
 	}{
-		{"/mcp", "", "", "GET", 401}, {"/servers", "relay", "", "POST", 401}, {"/servers", "admin", "", "GET", 405}, {"/missing", "", "", "GET", 401}, {"/mcp", "relay", "https://evil.example", "GET", 403}, {"/servers", "admin", "http://example.com", "DELETE", 400},
+		{"/mcp", "", "", "GET", 401}, {"/servers", "relay", "", "POST", 401}, {"/servers", "admin", "", "GET", 405},
+		{"/health", "relay", "", "GET", 200}, {"/health", "admin", "", "GET", 200},
+		{"/signin/start", "relay", "", "POST", 401}, {"/signin/start", "admin", "", "POST", 400},
+		{"/missing", "", "", "GET", 401}, {"/mcp", "relay", "https://evil.example", "GET", 403}, {"/servers", "admin", "http://example.com", "DELETE", 400},
 	} {
 		r := httptest.NewRequest(tc.method, "http://example.com"+tc.path, nil)
 		if tc.token != "" {
@@ -72,6 +203,80 @@ func TestAuthenticationAndOrigins(t *testing.T) {
 	if _, _, err := Handler("unused", "test", "", ""); err == nil {
 		t.Fatal("allowed no token")
 	}
+}
+
+// TestPairingPinsTLSIssuesScopedCredentialsAndRevokesThem exercises enrollment end to end.
+func TestPairingPinsTLSIssuesScopedCredentialsAndRevokesThem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "servers.json")
+	manager, err := newDeviceManager(path, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, cleanup, err := handler(path, "test", "", "", manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	srv := httptest.NewUnstartedServer(h)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{manager.certificate()}, MinVersion: tls.VersionTLS12}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	identity, err := InspectPairing(ctx, srv.URL)
+	if err != nil || identity.Fingerprint != manager.fingerprint {
+		t.Fatalf("InspectPairing = %+v, %v", identity, err)
+	}
+	paired, err := Pair(ctx, srv.URL, identity.Fingerprint, manager.execCode, "test client", "execution")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Pair(ctx, srv.URL, identity.Fingerprint, manager.execCode, "second client", "execution"); err == nil {
+		t.Fatal("one-time execution code was reused")
+	}
+	c, err := New(config.Remote{URL: srv.URL, PeerID: paired.ID, Fingerprint: identity.Fingerprint, Token: paired.Token}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Health(ctx); err != nil {
+		t.Fatalf("paired execution credential health check: %v", err)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+paired.Token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("execution credential accessed admin route: HTTP %d", resp.StatusCode)
+	}
+	adminPair, err := Pair(ctx, srv.URL, identity.Fingerprint, manager.adminCode, "admin client", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := New(config.Remote{URL: srv.URL, PeerID: adminPair.ID, Fingerprint: identity.Fingerprint, Token: adminPair.Token}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/servers", nil)
+	adminResp, err := admin.adminHTTP().Do(adminReq)
+	if err != nil {
+		t.Fatalf("paired admin request: %v", err)
+	}
+	adminResp.Body.Close()
+	if adminResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("paired admin role did not authorize admin route: HTTP %d", adminResp.StatusCode)
+	}
+	admin.Close()
+	if revoked, err := RevokeDevice(path, paired.ID); err != nil || !revoked {
+		t.Fatalf("RevokeDevice = %v, %v", revoked, err)
+	}
+	if err := c.Health(ctx); err == nil {
+		t.Fatal("revoked credential still passed health check")
+	}
+	c.Close()
 }
 
 // TestExistingSessionAdoptsServers verifies add/remove and result metadata through a live relay.
@@ -90,8 +295,13 @@ func TestExistingSessionAdoptsServers(t *testing.T) {
 	if result, err := c.Listing(ctx, true); err != nil || result.Has("config") {
 		t.Fatalf("remote listing exposed host config path: %v %v", result, err)
 	}
-	if _, err := c.Edit(ctx, "fixture", wire.Object{{Name: "url", Value: downstream.URL}}); err != nil {
-		t.Fatal(err)
+	added, err := c.Edit(ctx, "fixture", wire.Object{{Name: "url", Value: downstream.URL}})
+	if err != nil || added.Replaced {
+		t.Fatalf("add: %+v %v", added, err)
+	}
+	replaced, err := c.Edit(ctx, "fixture", wire.Object{{Name: "url", Value: downstream.URL}})
+	if err != nil || !replaced.Replaced {
+		t.Fatalf("replace: %+v %v", replaced, err)
 	}
 	result, err := c.Search(ctx, "echo", 8, true)
 	if err != nil || wire.String(result.Get("total")) != "1" {
@@ -106,7 +316,7 @@ func TestExistingSessionAdoptsServers(t *testing.T) {
 		t.Fatalf("metadata lost: %v", result)
 	}
 	removed, err := c.Edit(ctx, "fixture", nil)
-	if err != nil || !removed {
+	if err != nil || !removed.Removed {
 		t.Fatalf("remove: %v %v", removed, err)
 	}
 	result, err = c.Listing(ctx, true)
@@ -448,7 +658,7 @@ func TestSafeCatalogKeepsSignInInstruction(t *testing.T) {
 	out := safeCatalog(wire.Object{{Name: "integrations", Value: rows}}, "integrations")
 	got, _ := out.Get("integrations").([]any)
 	want := []string{
-		`needs you to sign in: run "tap auth cloudflare" on the machine running tap remote serve`,
+		`needs you to sign in: run "tap auth cloudflare"`,
 		"server unavailable",
 		"server unavailable",
 	}

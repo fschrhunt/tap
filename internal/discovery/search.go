@@ -26,10 +26,19 @@ type Match struct {
 	Score float64
 }
 
-// Query and candidate limits bound ranking memory and repeated catalog scans.
+// Query, candidate and ranking limits bound ranking memory and repeated catalog scans.
 const MaxQueryBytes = 4096
 const MaxQueryTerms = 32
 const MaxRankTools = 65536
+
+// MaxRankMatrixBytes caps the BM25 count matrix, terms times candidates, before allocation.
+const MaxRankMatrixBytes = 32 << 20
+
+// WithinLimits reports whether a query and catalog are small enough to rank. Gateways check
+// it to name the offending input instead of silently ranking nothing.
+func WithinLimits(tools int, query string) bool {
+	return len(query) <= MaxQueryBytes && tools <= MaxRankTools && len(Tokens(query))*(tools+1) <= MaxRankMatrixBytes
+}
 
 var stops = map[string]bool{"a": true, "an": true, "the": true, "to": true, "of": true, "for": true, "in": true, "on": true, "with": true, "my": true, "me": true, "please": true, "can": true, "you": true, "i": true, "want": true, "would": true, "like": true, "and": true, "is": true}
 
@@ -192,10 +201,10 @@ func count(tools []Tool, q []string) []tally {
 //
 // Nothing is kept between queries: each one reads the catalog it is given, which costs less
 // than a millisecond for hundreds of tools and leaves nothing to build before the first.
-// Queries over 4096 bytes or catalogs over 65536 tools return no matches; gateways
-// must reject these inputs with a diagnostic before invoking Rank.
+// WithinLimits gates the inputs; Rank returns no matches for anything beyond them, so a
+// gateway must reject such input with its own diagnostic before invoking Rank.
 func Rank(tools []Tool, query string) []Match {
-	if len(query) > MaxQueryBytes || len(tools) > MaxRankTools {
+	if !WithinLimits(len(tools), query) {
 		return nil
 	}
 	if asked := strings.Join(Tokens(query), " "); asked != "" {

@@ -18,10 +18,16 @@ short introduction instead of waiting for an agent that is not there.
 | `tap search QUERY...` | Find tools, with what is needed to call them |
 | `tap inspect SERVER.TOOL` | Print one tool's whole contract |
 | `tap call SERVER.TOOL [KEY=VALUE]... [--args JSON]` | Call a tool |
-| `tap remote serve` | Host the registry over authenticated HTTP or HTTPS |
-| `tap remote use URL` | Select a remote for CLI commands and stdio relays |
+| `tap remote serve` | Host the registry with device pairing or bearer-token auth |
+| `tap remote pair NAME HTTPS_URL` | Pair this device after manually verifying the host fingerprint |
+| `tap remote devices` | List devices paired to this serving machine |
+| `tap remote revoke DEVICE_ID` | Revoke one paired device on this serving machine |
+| `tap remote add NAME URL` | Save a named remote profile |
+| `tap remote use NAME` | Select a saved remote for CLI commands and stdio relays |
+| `tap remote list` | List saved remote profiles and the selected one |
+| `tap remote remove NAME` | Remove a saved remote profile |
 | `tap remote off` | Return to the saved local registry |
-| `tap remote status` | Print the selected relay endpoint |
+| `tap remote status [--check]` | Show the selected target; optionally check reachability |
 | `tap config [NAME]` | Show the [settings](settings.md), or one of them |
 | `tap config set NAME VALUE` | Change a setting; `--server NAME` for one server's own |
 | `tap config unset NAME` | Return a setting to its default, or a server to the general value |
@@ -59,8 +65,10 @@ Everything after `--` is taken as written: for `tap add`, it is the server's com
 | `-n`, `--dry-run` | `import` | Show what would be added and add nothing |
 | `-f`, `--force` | `import` | Replace servers tap already has under the same name |
 
-With a remote selected, `add`, `remove`, `list`, `refresh`, `search`, `inspect` and `call` use it; `--local` uses the
-saved local registry. See [Remote](remote.md) for listener, TLS and authentication options.
+With a remote selected, registry commands including `auth` use it; `--local` uses the
+saved local registry. `config` always manages this local tap installation. `import` reads
+this machine's agent files and remains local-only. See
+[Remote](remote.md) for listener, TLS and authentication options.
 `path` still prints the local config file that stores the remote selection.
 
 ## Output and exit codes
