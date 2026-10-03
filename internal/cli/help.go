@@ -63,16 +63,18 @@ var topics = []topic{
 		usage: []string{"tap refresh [NAME] [--json]"}, about: "Asks one server, or all of them, for its tools again and saves what it answers.",
 		examples: []string{"tap refresh github", "tap refresh"}, flags: [][2]string{{"    --json", "print the servers as JSON"}}},
 	{name: "auth", group: "Servers", summary: "sign in to a server", page: "servers.md#signing-in",
-		usage: []string{"tap auth NAME [--client-id ID] [--port PORT] [--no-browser]", "tap auth NAME --remove"},
+		usage: []string{"tap auth NAME [--client-id ID] [--port PORT] [--no-browser] [--local]", "tap auth NAME --remove [--local]"},
 		about: "Signs in to an HTTP server through your browser and saves the result, so your agents can\n" +
 			"use the server without asking again. tap renews the sign-in by itself while it can.\n" +
-			"On a machine with no browser, open the page it prints on another one and paste the\n" +
-			"address the browser ends on.",
+			"With a remote selected, tap opens the browser here and relays the callback; the remote\n" +
+			"keeps the sign-in. Use --local to sign in to this machine's own server instead.",
 		examples: []string{"tap auth linear", "tap auth linear --no-browser", "tap auth github --client-id Iv1.abc123 --port 8765", "tap auth linear --remove"},
 		flags: [][2]string{{"    --client-id ID", "an app you registered with the provider, for those that need one"},
 			{"    --client-secret-file FILE", "that app's secret, read from a file (- for standard input)"},
-			{"-p, --port PORT", "the port your browser is sent back to on this machine"},
-			{"    --no-browser", "print the page's address instead of opening it"}, {"    --remove", "forget the sign-in"}}},
+			{"-p, --port PORT", "the callback port (for providers that need a registered address)"},
+			{"    --no-browser", "print the page's address instead of opening it"},
+			{"    --local", "use this machine's registry instead of the selected remote"},
+			{"    --remove", "forget the sign-in"}}},
 	{name: "search", group: "Tools", summary: "find tools, the way your agent does", page: "cli.md#search",
 		usage: []string{"tap search QUERY... [--server NAME] [--limit N] [--json]", "tap search --server NAME"},
 		about: "Prints the tools that best match the query, with the id to call each by. Words are\n" +
@@ -95,13 +97,16 @@ var topics = []topic{
 		flags:    [][2]string{{"    --args JSON", "the arguments as a JSON object (- reads standard input)"}, {"    --json", "print the tool's whole result as JSON"}}},
 	{name: "remote", group: "More than one machine", summary: "share one set of servers between machines", page: "remote.md",
 		usage: []string{"tap remote serve [--addr HOST:PORT] [--tls-cert FILE --tls-key FILE] [--allow-insecure]",
-			"tap remote use URL [--token-env VARIABLE] [--allow-insecure]", "tap remote off", "tap remote status"},
-		about: "One machine serves its servers; the others use them. serve needs a token in\n" +
-			"TAP_REMOTE_TOKEN, and so does every machine that uses it. Plain HTTP beyond this\n" +
-			"machine needs --allow-insecure on both ends.",
-		examples: []string{"tap remote serve --addr 0.0.0.0:8765 --tls-cert cert.pem --tls-key key.pem", "tap remote use https://tap.example.com:8765", "tap remote status", "tap remote off"},
-		flags: [][2]string{{"    --addr HOST:PORT", "where serve listens (default 127.0.0.1:7777)"}, {"    --tls-cert FILE, --tls-key FILE", "serve HTTPS with this certificate"},
-			{"    --token-env VARIABLE", "the variable holding the token (default TAP_REMOTE_TOKEN)"}, {"    --allow-insecure", "allow plain HTTP beyond this machine"}}},
+			"tap remote pair NAME HTTPS_URL [--role execution|admin]", "tap remote devices", "tap remote revoke DEVICE_ID",
+			"tap remote add NAME URL [--token-env VARIABLE] [--allow-insecure]", "tap remote use NAME", "tap remote list", "tap remote remove NAME",
+			"tap remote use URL [--token-env VARIABLE] [--allow-insecure]", "tap remote off", "tap remote status [--check]"},
+		about: "Without TAP_REMOTE_TOKEN, serve starts paired-device HTTPS with a one-time code and\n" +
+			"certificate fingerprint. Otherwise it uses the legacy bearer-token mode. Saved profiles\n" +
+			"select the default target for ordinary registry commands.",
+		examples: []string{"tap remote serve", "tap remote pair home https://tap-host:45829", "tap remote devices", "tap remote add home https://tap.example.com:8765", "tap remote use home", "tap remote status --check", "tap remote off"},
+		flags: [][2]string{{"    --addr HOST:PORT", "where serve listens (paired default 0.0.0.0:45829; token mode 127.0.0.1:7777)"}, {"    --tls-cert FILE, --tls-key FILE", "serve with this certificate; paired mode pins its fingerprint"},
+			{"    --role execution|admin", "paired device permissions (default execution)"}, {"    --token-env VARIABLE", "the variable holding the token (default TAP_REMOTE_TOKEN)"},
+			{"    --allow-insecure", "allow plain HTTP beyond this machine in token mode"}, {"    --check", "check remote reachability with the configured credential"}}},
 	{name: "config", group: "Other", summary: "show or change tap's settings", page: "settings.md",
 		usage: []string{"tap config [--json]", "tap config NAME [--server NAME]", "tap config set NAME VALUE [--server NAME]", "tap config unset NAME [--server NAME]"},
 		about: "Shows each setting, its value and where the value comes from: its default, the\n" +

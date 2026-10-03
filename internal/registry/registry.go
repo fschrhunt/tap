@@ -19,6 +19,7 @@ import (
 
 	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/human"
 	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -322,7 +323,7 @@ func transportFor(path, name string, def wire.Object, quiet bool) (mcp.Transport
 			cmd.Env = append(cmd.Env, f.Name+"="+config.Expand(f.Value))
 		}
 		if !quiet {
-			cmd.Stderr = wire.HumanWriter{Writer: os.Stderr}
+			cmd.Stderr = human.Writer{W: os.Stderr}
 		}
 		return &commandTransport{command: cmd, name: config.Home(argv[0])}, nil
 	}

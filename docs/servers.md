@@ -102,15 +102,18 @@ tap auth linear
 
 `tap auth` opens the provider's sign-in page in your browser and waits for you to finish. tap
 then saves the sign-in and renews it by itself, so your agents use the server without asking.
-Agents that are already running find the server's tools on their next search.
+Agents that are already running find the server's tools on their next search. With a remote
+selected, tap runs the OAuth exchange and stores the grant on that remote while relaying the
+browser callback automatically; no SSH session or copied redirect address is needed. Use
+`tap auth NAME --local` when you mean a server in this machine's own registry.
 
-- **No browser on this machine.** Over SSH, run `tap auth NAME --no-browser`, open the address
-  it prints in a browser anywhere, and sign in. The browser ends on an address that starts with
-  `http://127.0.0.1` and does not load; paste that address into the waiting `tap auth`.
+- **No browser opener.** Run `tap auth NAME --no-browser`, open the printed page manually in
+  your browser, and finish sign-in. The callback still returns to tap automatically.
 - **A provider that does not register clients.** tap registers itself with the provider when
   the provider allows it. When it does not, create an app there with the redirect address
-  `http://127.0.0.1:PORT/callback`, and run `tap auth NAME --client-id ID --port PORT`. For an
-  app with a secret, add `--client-secret-file FILE`; the secret is read from the file, never
+  `http://127.0.0.1:PORT/callback`, and run `tap auth NAME --client-id ID --port PORT`. The
+  callback port is opened on the machine running tap, including when a remote is selected. For
+  an app with a secret, add `--client-secret-file FILE`; the secret is read from the file, never
   from a flag.
 - **Signing out.** `tap auth NAME --remove` forgets the sign-in. `tap remove NAME` does too,
   locally and through a remote. Running processes check the owner-only store before lending
@@ -128,8 +131,9 @@ Sign-ins are kept in `servers.json.auth.json` beside the config, readable only b
 refuses to use the file if anyone else can read it. A sign-in belongs to the address it was
 given for: change a server's `url` and it is asked for again. A server with a
 `bearerTokenEnv` or an `Authorization` header uses that instead and is never sent a sign-in.
-With a remote selected, the sign-in lives on the machine that runs the server: run `tap auth`
-there.
+With a remote selected, `tap auth NAME` stores the sign-in on the remote. `--local` explicitly
+targets this machine's registry. Authenticated remote administration is required to create or
+remove a remote sign-in; the grant itself never travels back to the client.
 
 ## The config file
 

@@ -78,13 +78,13 @@ func (r *commandReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	if r.offset == len(r.frame) {
-		r.frame = r.frame[:0]
+		r.frame = nil
 		r.offset = 0
 		for {
 			part, err := r.reader.ReadSlice('\n')
 			if len(part) > wire.MaxMessageBytes-len(r.frame) {
 				r.frame = nil
-				return 0, fmt.Errorf("downstream stdio frame exceeds 16 MiB")
+				return 0, fmt.Errorf("downstream stdio frame exceeds %d MiB", wire.MaxMessageBytes>>20)
 			}
 			if need := len(r.frame) + len(part); need > cap(r.frame) {
 				grown := make([]byte, len(r.frame), min(wire.MaxMessageBytes, max(need, 2*cap(r.frame))))

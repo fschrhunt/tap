@@ -3,8 +3,12 @@ package remote
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,21 +17,51 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/human"
 	"github.com/fschrhunt/tap/internal/registry"
 	"github.com/fschrhunt/tap/internal/server"
 	"github.com/fschrhunt/tap/internal/wire"
+	"github.com/grandcat/zeroconf"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const bodyLimit = 4 << 20
+const maxSignInFlows = 8
 
-// Options controls the listener; tokens always come from the environment.
+type signInFlow struct {
+	page     chan string
+	callback chan url.Values
+	done     chan signInResult
+	cancel   context.CancelFunc
+}
+
+type signInResult struct {
+	result *auth.Result
+	err    error
+}
+
+func validCallback(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "http" && config.Loopback(u.Hostname()) && u.Port() != "" && u.Path == "/callback" && u.RawQuery == "" && u.Fragment == "" && u.User == nil
+}
+
+func matchesToken(authorization, token string) bool {
+	if token == "" {
+		return false
+	}
+	got := sha256.Sum256([]byte(authorization))
+	want := sha256.Sum256([]byte("Bearer " + token))
+	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
+}
+
+// Options controls the listener address and optional TLS identity.
 type Options struct {
 	Addr, TLSCert, TLSKey string
 	AllowInsecure         bool
@@ -38,6 +72,13 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 	if token == "" {
 		return nil, nil, fmt.Errorf("TAP_REMOTE_TOKEN must be set")
 	}
+	return handler(path, version, token, adminToken, nil)
+}
+
+func handler(path, version, token, adminToken string, devices *deviceManager) (http.Handler, func(), error) {
+	if token == "" && devices == nil {
+		return nil, nil, fmt.Errorf("a remote execution credential is required")
+	}
 	if adminToken == "" {
 		adminToken = token
 	}
@@ -47,10 +88,14 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 		e.Close()
 		return nil, nil, err
 	}
+	authFlows := make(map[string]*signInFlow)
+	var authMu sync.Mutex
+	authCtx, stopAuth := context.WithCancel(context.Background())
 	go e.Warm()
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{MaxRequestBodyBytes: bodyLimit, SessionTimeout: 30 * time.Minute, PropagateRequestCancellation: true})
 	mux := http.NewServeMux()
 	// Serialize admissions so simultaneous initializations cannot exceed the session cap.
+	const maxSessions = 64
 	var admission sync.Mutex
 	admissions, stopAdmissions := context.WithCancel(context.Background())
 	closed := false
@@ -58,7 +103,7 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" {
 			if !admission.TryLock() {
 				w.Header().Set("Retry-After", "1")
-				http.Error(w, "session initialization busy", http.StatusTooManyRequests)
+				http.Error(w, "another session is initializing; retry shortly", http.StatusTooManyRequests)
 				return
 			}
 			defer admission.Unlock()
@@ -76,14 +121,52 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 			for range s.Sessions() {
 				n++
 			}
-			if n >= 64 {
+			if n >= maxSessions {
 				w.Header().Set("Retry-After", "60")
-				http.Error(w, "MCP session limit reached; close an unused session", http.StatusTooManyRequests)
+				http.Error(w, fmt.Sprintf("at most %d MCP sessions are allowed; close an unused one", maxSessions), http.StatusTooManyRequests)
 				return
 			}
 		}
 		mcpHandler.ServeHTTP(w, r)
 	}))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+	mux.HandleFunc("/identity", func(w http.ResponseWriter, r *http.Request) {
+		if devices == nil || r.TLS == nil || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(PairingInfo{ID: devices.id, Name: devices.name, Fingerprint: devices.fingerprint})
+	})
+	mux.HandleFunc("/pair", func(w http.ResponseWriter, r *http.Request) {
+		if devices == nil || r.TLS == nil {
+			http.Error(w, "pairing requires HTTPS", http.StatusUpgradeRequired)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var input struct{ Code, Name, Role string }
+		if json.NewDecoder(r.Body).Decode(&input) != nil {
+			http.Error(w, "invalid pairing request", http.StatusBadRequest)
+			return
+		}
+		id, credential, err := devices.enroll(input.Code, input.Name, input.Role)
+		if err != nil {
+			http.Error(w, "pairing failed", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(PairResult{ID: id, Token: credential, Role: input.Role})
+	})
 	mux.HandleFunc("/servers", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -114,14 +197,14 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 			http.Error(w, "invalid server name", 400)
 			return
 		}
-		removed := false
+		removed, replaced := false, false
 		if r.Method == http.MethodPost {
 			def, ok := obj.Get("definition").(wire.Object)
 			if !ok {
 				http.Error(w, "invalid server definition", 400)
 				return
 			}
-			err = config.Add(path, name, def)
+			replaced, err = config.Put(path, name, def)
 		} else {
 			if _, err = auth.Remove(path, name); err == nil {
 				removed, err = config.Remove(path, name)
@@ -132,19 +215,161 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"removed": removed, "replaced": replaced})
+	})
+	mux.HandleFunc("/signin/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var input struct {
+			Name, RedirectURL, ClientID, ClientSecret string
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || !validCallback(input.RedirectURL) {
+			http.Error(w, "invalid sign-in request", http.StatusBadRequest)
+			return
+		}
+		servers, err := config.Load(path)
+		if err != nil {
+			http.Error(w, "cannot load server registry", http.StatusInternalServerError)
+			return
+		}
+		def, ok := servers.Get(input.Name).(wire.Object)
+		if !ok {
+			http.Error(w, "unknown server", http.StatusNotFound)
+			return
+		}
+		endpoint, _ := def.Get("url").(string)
+		if endpoint == "" {
+			http.Error(w, "server does not use an HTTP address", http.StatusBadRequest)
+			return
+		}
+		idBytes := make([]byte, 24)
+		if _, err := rand.Read(idBytes); err != nil {
+			http.Error(w, "cannot start sign-in", http.StatusInternalServerError)
+			return
+		}
+		id := base64.RawURLEncoding.EncodeToString(idBytes)
+		flowCtx, cancel := context.WithTimeout(authCtx, 10*time.Minute)
+		flow := &signInFlow{page: make(chan string, 1), callback: make(chan url.Values, 1), done: make(chan signInResult, 1), cancel: cancel}
+		authMu.Lock()
+		if len(authFlows) >= maxSignInFlows {
+			authMu.Unlock()
+			cancel()
+			http.Error(w, "too many sign-ins are in progress", http.StatusTooManyRequests)
+			return
+		}
+		authFlows[id] = flow
+		authMu.Unlock()
+		headers := make(http.Header)
+		if h, ok := def.Get("headers").(wire.Object); ok {
+			for _, f := range h {
+				headers.Set(f.Name, config.Expand(f.Value))
+			}
+		}
+		go func() {
+			result, err := auth.Authorize(flowCtx, auth.Options{ConfigPath: path, Name: input.Name, Endpoint: endpoint, Headers: headers,
+				ClientID: input.ClientID, ClientSecret: input.ClientSecret, Version: version, RedirectURL: input.RedirectURL, AuthPage: flow.page, Callback: flow.callback})
+			flow.done <- signInResult{result: result, err: err}
+			close(flow.done)
+			cancel()
+			time.AfterFunc(time.Minute, func() {
+				authMu.Lock()
+				delete(authFlows, id)
+				authMu.Unlock()
+			})
+		}()
+		select {
+		case page := <-flow.page:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "url": page})
+		case result := <-flow.done:
+			if result.err != nil {
+				http.Error(w, "could not check sign-in", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"complete": true, "result": result.result})
+		case <-r.Context().Done():
+			cancel()
+		}
+	})
+	mux.HandleFunc("/signin/remove", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var input struct{ Name string }
+		if json.NewDecoder(r.Body).Decode(&input) != nil || input.Name == "" {
+			http.Error(w, "invalid sign-out request", http.StatusBadRequest)
+			return
+		}
+		removed, err := auth.Remove(path, input.Name)
+		if err != nil {
+			http.Error(w, "cannot update sign-in store", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"removed": removed})
+	})
+	mux.HandleFunc("/signin/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/signin/")
+		if id == "" || strings.Contains(id, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		authMu.Lock()
+		flow := authFlows[id]
+		authMu.Unlock()
+		if flow == nil {
+			http.Error(w, "sign-in expired", http.StatusGone)
+			return
+		}
+		if err := r.ParseForm(); err != nil || r.Form.Get("state") == "" {
+			http.Error(w, "invalid callback", http.StatusBadRequest)
+			return
+		}
+		select {
+		case flow.callback <- r.Form:
+		default:
+			http.Error(w, "callback already received", http.StatusConflict)
+			return
+		}
+		select {
+		case result := <-flow.done:
+			if result.err != nil {
+				http.Error(w, "sign-in failed", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(result.result)
+		case <-r.Context().Done():
+		}
 	})
 	protected := http.NewCrossOriginProtection().Handler(mux)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		expected := token
-		if r.URL.Path == "/servers" {
-			expected = adminToken
-		}
-		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-		want := sha256.Sum256([]byte("Bearer " + expected))
-		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			http.Error(w, "unauthorized", 401)
+		publicPairing := r.URL.Path == "/identity" || r.URL.Path == "/pair"
+		if publicPairing && r.TLS == nil {
+			http.Error(w, "pairing requires HTTPS", http.StatusUpgradeRequired)
 			return
+		}
+		if !publicPairing {
+			authorization := r.Header.Get("Authorization")
+			execution := matchesToken(authorization, token)
+			administration := matchesToken(authorization, adminToken)
+			role := ""
+			if devices != nil && strings.HasPrefix(authorization, "Bearer ") {
+				role = devices.role(strings.TrimPrefix(authorization, "Bearer "))
+			}
+			adminRoute := r.URL.Path == "/servers" || strings.HasPrefix(r.URL.Path, "/signin/")
+			if adminRoute && !administration && role != "admin" || !adminRoute && !execution && !administration && role == "" {
+				http.Error(w, "unauthorized", 401)
+				return
+			}
 		}
 		// All browser origins must match the endpoint, including safe GET methods.
 		if origin := r.Header.Get("Origin"); origin != "" {
@@ -162,6 +387,13 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 		protected.ServeHTTP(w, r)
 	})
 	return h, func() {
+		stopAuth()
+		authMu.Lock()
+		for _, flow := range authFlows {
+			flow.cancel()
+		}
+		authFlows = make(map[string]*signInFlow)
+		authMu.Unlock()
 		stopAdmissions()
 		admission.Lock()
 		defer admission.Unlock()
@@ -175,8 +407,14 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 
 // Serve listens until cancellation, requiring TLS or explicit consent off loopback.
 func Serve(ctx context.Context, path, version string, opts Options) error {
+	token := os.Getenv("TAP_REMOTE_TOKEN")
+	paired := token == ""
 	if opts.Addr == "" {
-		opts.Addr = "127.0.0.1:7777"
+		if paired {
+			opts.Addr = "0.0.0.0:45829"
+		} else {
+			opts.Addr = "127.0.0.1:7777"
+		}
 	}
 	host, _, err := net.SplitHostPort(opts.Addr)
 	if err != nil {
@@ -185,10 +423,20 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 	if (opts.TLSCert == "") != (opts.TLSKey == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be supplied together")
 	}
-	if !config.Loopback(host) && opts.TLSCert == "" && !opts.AllowInsecure {
+	if !paired && !config.Loopback(host) && opts.TLSCert == "" && !opts.AllowInsecure {
 		return fmt.Errorf("nonloopback remote serve requires TLS or --allow-insecure")
 	}
-	h, cleanup, err := Handler(path, version, os.Getenv("TAP_REMOTE_TOKEN"), os.Getenv("TAP_REMOTE_ADMIN_TOKEN"))
+	var devices *deviceManager
+	var h http.Handler
+	var cleanup func()
+	if paired {
+		devices, err = newDeviceManager(path, opts.TLSCert, opts.TLSKey)
+		if err == nil {
+			h, cleanup, err = handler(path, version, "", "", devices)
+		}
+	} else {
+		h, cleanup, err = Handler(path, version, token, os.Getenv("TAP_REMOTE_ADMIN_TOKEN"))
+	}
 	if err != nil {
 		return err
 	}
@@ -198,6 +446,26 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 		return fmt.Errorf("cannot listen on remote address")
 	}
 	defer listener.Close()
+	var mdns *zeroconf.Server
+	if paired {
+		if !config.Loopback(host) {
+			_, port, _ := net.SplitHostPort(listener.Addr().String())
+			portNumber, _ := strconv.Atoi(port)
+			mdns, err = zeroconf.Register(devices.name, pairingService, "local.", portNumber,
+				[]string{"id=" + devices.id, "fingerprint=" + devices.fingerprint, "scheme=https"}, nil)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "tap: local-network discovery is unavailable; pairing by address still works")
+			}
+		}
+		out := human.Writer{W: os.Stderr}
+		fmt.Fprintf(out, "tap remote serve: paired devices only on %s\n", listener.Addr())
+		fmt.Fprintf(out, "Verify this TLS fingerprint on each client: %s\n", devices.fingerprint)
+		fmt.Fprintf(out, "Admin pairing code (valid for 15 minutes): %s\n", devices.adminCode)
+		fmt.Fprintf(out, "Execution-only pairing code (valid for 15 minutes): %s\n", devices.execCode)
+	}
+	if mdns != nil {
+		defer mdns.Shutdown()
+	}
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	done := make(chan struct{})
 	defer close(done)
@@ -208,7 +476,9 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 		case <-done:
 		}
 	}()
-	if opts.TLSCert != "" {
+	if paired {
+		err = srv.Serve(tls.NewListener(listener, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{devices.certificate()}}))
+	} else if opts.TLSCert != "" {
 		err = srv.ServeTLS(listener, opts.TLSCert, opts.TLSKey)
 	} else {
 		err = srv.Serve(listener)
@@ -243,27 +513,155 @@ type initialization struct {
 	err     error
 }
 
-// New validates relay settings and requires a nonempty environment token.
+// New validates relay settings and resolves either a paired credential or a legacy environment token.
 func New(cfg config.Remote, version string) (*Client, error) {
 	endpoint, err := config.NormalizeURL(cfg.URL, cfg.AllowInsecure)
 	if err != nil {
 		return nil, err
 	}
 	cfg.URL = endpoint
-	if cfg.TokenEnv == "" {
+	if cfg.TokenEnv == "" && cfg.PeerID == "" {
 		cfg.TokenEnv = "TAP_REMOTE_TOKEN"
 	}
-	token := os.Getenv(cfg.TokenEnv)
+	token := cfg.Token
+	if token == "" && cfg.PeerID == "" && cfg.TokenEnv != "" {
+		token = os.Getenv(cfg.TokenEnv)
+	}
 	if token == "" {
+		if cfg.PeerID != "" {
+			return nil, fmt.Errorf("paired remote credentials are missing; pair this device again")
+		}
 		return nil, fmt.Errorf("remote token environment variable %s is not set", cfg.TokenEnv)
 	}
 	lifetime, cancel := context.WithCancel(context.Background())
-	return &Client{ctx: lifetime, cancel: cancel, cfg: cfg, version: version, http: &http.Client{Transport: bearerTransport{token: token}, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("remote redirects are forbidden") }}}, nil
+	base := http.RoundTripper(nil)
+	if cfg.Fingerprint != "" {
+		base = pinnedTransport(cfg.Fingerprint)
+	}
+	return &Client{ctx: lifetime, cancel: cancel, cfg: cfg, version: version, http: &http.Client{Transport: bearerTransport{token: token, base: base}, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("remote redirects are forbidden") }}}, nil
+}
+
+// pinnedTransport encrypts traffic and accepts only the server certificate paired out of band.
+func pinnedTransport(fingerprint string) *http.Transport {
+	want, _ := hex.DecodeString(fingerprint)
+	return &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, VerifyConnection: func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
+			return fmt.Errorf("remote sent no certificate")
+		}
+		got := sha256.Sum256(state.PeerCertificates[0].Raw)
+		if subtle.ConstantTimeCompare(got[:], want) != 1 {
+			return fmt.Errorf("remote certificate changed; pair the device again after verifying its identity")
+		}
+		return nil
+	}}}
+}
+
+// PairingInfo fetches the unauthenticated identity presented over TLS; the caller must verify
+// its fingerprint out of band before sending a pairing code.
+type PairingInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// InspectPairing reads a candidate server identity without trusting it or sending credentials.
+func InspectPairing(ctx context.Context, rawURL string) (*PairingInfo, error) {
+	endpoint, err := config.NormalizeURL(rawURL, false)
+	if err != nil || !strings.HasPrefix(endpoint, "https://") {
+		return nil, fmt.Errorf("pairing requires an HTTPS address")
+	}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("redirects are forbidden") }}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(endpoint, "/mcp")+"/identity", nil)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pairing address")
+	}
+	resp, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach pairing endpoint")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+		return nil, fmt.Errorf("remote does not offer device pairing")
+	}
+	var info PairingInfo
+	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&info) != nil {
+		return nil, fmt.Errorf("invalid remote identity")
+	}
+	fingerprint := sha256.Sum256(resp.TLS.PeerCertificates[0].Raw)
+	if !strings.EqualFold(info.Fingerprint, hex.EncodeToString(fingerprint[:])) {
+		return nil, fmt.Errorf("remote identity fingerprint does not match its TLS certificate")
+	}
+	return &info, nil
+}
+
+// PairResult is the per-device credential returned once over the pinned TLS connection.
+type PairResult struct {
+	ID    string `json:"id"`
+	Token string `json:"token"`
+	Role  string `json:"role"`
+}
+
+// Pair enrolls one client using a one-time host code after the TLS identity was checked out of band.
+func Pair(ctx context.Context, rawURL, fingerprint, code, deviceName, role string) (*PairResult, error) {
+	endpoint, err := config.NormalizeURL(rawURL, false)
+	if err != nil || !strings.HasPrefix(endpoint, "https://") {
+		return nil, fmt.Errorf("pairing requires an HTTPS address")
+	}
+	if role != "admin" && role != "execution" {
+		return nil, fmt.Errorf("invalid pairing role")
+	}
+	body, err := json.Marshal(map[string]string{"code": code, "name": deviceName, "role": role})
+	if err != nil {
+		return nil, fmt.Errorf("invalid pairing request")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(endpoint, "/mcp")+"/pair", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("invalid pairing address")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	transport := pinnedTransport(fingerprint)
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("redirects are forbidden") }}
+	resp, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("pairing failed; verify the remote fingerprint and pairing code")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("pairing failed (HTTP %d)", resp.StatusCode)
+	}
+	var result PairResult
+	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&result) != nil || result.ID == "" || result.Token == "" || result.Role != role {
+		return nil, fmt.Errorf("invalid pairing response")
+	}
+	return &result, nil
 }
 
 type bearerTransport struct {
 	token string
 	base  http.RoundTripper
+}
+
+// Health reports whether the selected remote is reachable with this client's credential.
+func (c *Client) Health(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	endpoint := strings.TrimSuffix(c.cfg.URL, "/mcp") + "/health"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("invalid remote health request")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("remote is not reachable")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote health check failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
 }
 
 // RoundTrip attaches credentials only to requests issued by the redirect-free client.
@@ -447,8 +845,14 @@ func (c *Client) Call(ctx context.Context, id string, args any, quiet bool) (wir
 	return c.CallWithMeta(ctx, id, args, quiet, nil)
 }
 
+// EditResult reports whether a remote definition was replaced or removed.
+type EditResult struct {
+	Replaced bool `json:"replaced"`
+	Removed  bool `json:"removed"`
+}
+
 // Edit performs remote administration; an optional admin environment token overrides the relay token.
-func (c *Client) Edit(ctx context.Context, name string, definition wire.Object) (bool, error) {
+func (c *Client) Edit(ctx context.Context, name string, definition wire.Object) (EditResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	stop := context.AfterFunc(c.ctx, cancel)
@@ -462,33 +866,162 @@ func (c *Client) Edit(ctx context.Context, name string, definition wire.Object) 
 	}
 	b, err := wire.JSON(obj, false)
 	if err != nil {
-		return false, fmt.Errorf("invalid server definition")
+		return EditResult{}, fmt.Errorf("invalid server definition")
 	}
 	endpoint := strings.TrimSuffix(c.cfg.URL, "/mcp") + "/servers"
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, strings.NewReader(string(b)))
 	if err != nil {
-		return false, fmt.Errorf("invalid remote request")
+		return EditResult{}, fmt.Errorf("invalid remote request")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := c.http
-	if token := os.Getenv("TAP_REMOTE_ADMIN_TOKEN"); token != "" {
-		client = &http.Client{Transport: bearerTransport{token: token}, CheckRedirect: c.http.CheckRedirect}
-	}
+	client := c.adminHTTP()
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("remote administration failed")
+		return EditResult{}, fmt.Errorf("remote administration failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return false, fmt.Errorf("remote administration failed (HTTP %d)", resp.StatusCode)
+		return EditResult{}, fmt.Errorf("remote administration failed (HTTP %d)", resp.StatusCode)
 	}
-	var out struct {
+	var out EditResult
+	if json.NewDecoder(io.LimitReader(resp.Body, bodyLimit)).Decode(&out) != nil {
+		return EditResult{}, fmt.Errorf("invalid remote response")
+	}
+	return out, nil
+}
+
+func (c *Client) adminHTTP() *http.Client {
+	token := c.cfg.Token
+	if c.cfg.PeerID == "" {
+		token = os.Getenv("TAP_REMOTE_ADMIN_TOKEN")
+		if token == "" {
+			token = os.Getenv(c.cfg.TokenEnv)
+		}
+	}
+	var base http.RoundTripper
+	if transport, ok := c.http.Transport.(bearerTransport); ok {
+		base = transport.base
+	}
+	return &http.Client{Transport: bearerTransport{token: token, base: base}, CheckRedirect: c.http.CheckRedirect}
+}
+
+// Auth relays an OAuth callback through the laptop while keeping registration, exchange and
+// stored credentials on the serving machine.
+func (c *Client) Auth(ctx context.Context, name, clientID, clientSecret string, port int, open func(string) error, say io.Writer) (*auth.Result, error) {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		return nil, fmt.Errorf("cannot listen locally for the sign-in callback")
+	}
+	defer listener.Close()
+	id := ""
+	finished := make(chan signInResult, 1)
+	callbackServer := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/callback" || r.Method != http.MethodGet || r.URL.Query().Get("state") == "" {
+			http.Error(w, "invalid sign-in callback", http.StatusBadRequest)
+			return
+		}
+		endpoint := strings.TrimSuffix(c.cfg.URL, "/mcp") + "/signin/" + url.PathEscape(id)
+		request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, strings.NewReader(r.URL.RawQuery))
+		if err != nil {
+			http.Error(w, "could not relay sign-in callback", http.StatusBadGateway)
+			return
+		}
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err := c.adminHTTP().Do(request)
+		if err != nil {
+			finished <- signInResult{err: fmt.Errorf("could not finish remote sign-in")}
+			http.Error(w, "Tap could not finish sign-in with the remote. Return to the terminal.", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			finished <- signInResult{err: fmt.Errorf("remote sign-in failed (HTTP %d)", resp.StatusCode)}
+			http.Error(w, "Tap could not finish sign-in with the remote. Return to the terminal.", http.StatusBadGateway)
+			return
+		}
+		var result auth.Result
+		if json.NewDecoder(io.LimitReader(resp.Body, bodyLimit)).Decode(&result) != nil {
+			finished <- signInResult{err: fmt.Errorf("invalid remote sign-in response")}
+			http.Error(w, "Tap received an invalid sign-in response. Return to the terminal.", http.StatusBadGateway)
+			return
+		}
+		finished <- signInResult{result: &result}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "Tap is signed in. You can close this tab.\n")
+	})}
+	go func() { _ = callbackServer.Serve(listener) }()
+	defer callbackServer.Close()
+	redirect := "http://" + listener.Addr().String() + "/callback"
+	startURL := strings.TrimSuffix(c.cfg.URL, "/mcp") + "/signin/start"
+	var body struct {
+		ID       string       `json:"id"`
+		URL      string       `json:"url"`
+		Complete bool         `json:"complete"`
+		Result   *auth.Result `json:"result"`
+	}
+	if err := c.adminRequest(ctx, http.MethodPost, startURL, map[string]string{"name": name, "redirectURL": redirect, "clientID": clientID, "clientSecret": clientSecret}, &body); err != nil {
+		return nil, err
+	}
+	if body.Complete && body.Result != nil {
+		return body.Result, nil
+	}
+	if body.ID == "" || body.URL == "" {
+		return nil, fmt.Errorf("invalid remote sign-in response")
+	}
+	id = body.ID
+	if open != nil {
+		if err := open(body.URL); err != nil && say != nil {
+			fmt.Fprintf(say, "Open this page to sign in to %s:\n\n  %s\n\n", name, body.URL)
+		}
+	} else if say != nil {
+		fmt.Fprintf(say, "Open this page to sign in to %s:\n\n  %s\n\n", name, body.URL)
+	}
+	select {
+	case result := <-finished:
+		return result.result, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.ctx.Done():
+		return nil, c.ctx.Err()
+	}
+}
+
+// AuthRemove deletes a grant on the serving machine.
+func (c *Client) AuthRemove(ctx context.Context, name string) (bool, error) {
+	endpoint := strings.TrimSuffix(c.cfg.URL, "/mcp") + "/signin/remove"
+	var result struct {
 		Removed bool `json:"removed"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, bodyLimit)).Decode(&out) != nil {
-		return false, fmt.Errorf("invalid remote response")
+	if err := c.adminRequest(ctx, http.MethodPost, endpoint, map[string]string{"name": name}, &result); err != nil {
+		return false, err
 	}
-	return out.Removed, nil
+	return result.Removed, nil
+}
+
+func (c *Client) adminRequest(ctx context.Context, method, endpoint string, input, output any) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	body, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("invalid remote sign-in request")
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("invalid remote request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.adminHTTP().Do(req)
+	if err != nil {
+		return fmt.Errorf("remote sign-in request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote sign-in failed (HTTP %d)", resp.StatusCode)
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, bodyLimit)).Decode(output) != nil {
+		return fmt.Errorf("invalid remote sign-in response")
+	}
+	return nil
 }
 
 // Close shuts down the relay session and prevents reconnects.
@@ -603,8 +1136,7 @@ type hostedBackend struct{ *registry.Engine }
 func (e hostedBackend) ReferenceSessionRequired() bool { return true }
 
 // safeCatalog hides connector diagnostics that may contain credentials or commands. Tap's own
-// sign-in instruction names only a server, so it crosses the network unchanged apart from
-// pointing at where it can be acted on: the machine running tap remote serve.
+// sign-in instruction names only a server and can be acted on through the authenticated relay.
 func safeCatalog(out wire.Object, field string) wire.Object {
 	rows, _ := out.Get(field).([]any)
 	for _, v := range rows {
@@ -613,7 +1145,7 @@ func safeCatalog(out wire.Object, field string) wire.Object {
 			continue
 		}
 		if msg, _ := row.Get("error").(string); auth.IsRequiredMessage(msg) {
-			row.Set("error", msg+" on the machine running tap remote serve")
+			row.Set("error", msg)
 			continue
 		}
 		row.Set("error", "server unavailable")

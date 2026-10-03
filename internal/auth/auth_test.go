@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +160,52 @@ func TestAuthorizeSavesASignInOnlyItsOwnerCanRead(t *testing.T) {
 	again, err := Authorize(ctx, o)
 	if err != nil || again.SignedIn {
 		t.Fatalf("a second Authorize = %+v, %v; want it to reuse the saved sign-in", again, err)
+	}
+}
+
+// TestAuthorizeCanRelayTheBrowserCallback keeps OAuth state and token storage on the host while
+// allowing a client on another machine to own the loopback callback.
+func TestAuthorizeCanRelayTheBrowserCallback(t *testing.T) {
+	p := newProvider(t)
+	o := options(t, p)
+	o.Open = nil
+	o.RedirectURL = "http://127.0.0.1:45829/callback"
+	pages := make(chan string, 1)
+	callbacks := make(chan url.Values, 1)
+	o.AuthPage = pages
+	o.Callback = callbacks
+	done := make(chan struct {
+		result *Result
+		err    error
+	}, 1)
+	go func() {
+		result, err := Authorize(context.Background(), o)
+		done <- struct {
+			result *Result
+			err    error
+		}{result, err}
+	}()
+	page := <-pages
+	request, err := http.NewRequest(http.MethodGet, page, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("authorization page status = %d; want redirect", resp.StatusCode)
+	}
+	callback, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil || callback.Query().Get("state") == "" || callback.Query().Get("code") == "" {
+		t.Fatalf("authorization callback = %q, %v", resp.Header.Get("Location"), err)
+	}
+	callbacks <- callback.Query()
+	result := <-done
+	if result.err != nil || result.result == nil || !result.result.SignedIn || !result.result.HadGrant || result.result.Tools != 1 {
+		t.Fatalf("relayed Authorize = %+v, %v", result.result, result.err)
 	}
 }
 

@@ -54,7 +54,7 @@ func (e *Engine) Search(ctx context.Context, query string, limit float64, quiet 
 // Discover searches or browses scoped catalogs and discloses only the requested detail.
 func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (wire.Object, error) {
 	if len(opt.Query) > discovery.MaxQueryBytes {
-		return nil, &Failure{"invalid_query", "search query exceeds 4096 bytes", "Use a shorter query."}
+		return nil, &Failure{"invalid_query", fmt.Sprintf("search query exceeds %d bytes", discovery.MaxQueryBytes), "Use a shorter query."}
 	}
 	if opt.Detail == "" {
 		opt.Detail = "auto"
@@ -150,7 +150,7 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 				continue
 			}
 			if len(tools) >= discovery.MaxRankTools {
-				return nil, &Failure{"catalog_too_large", "search exceeds 65536 candidate tools", "Scope the search to one server."}
+				return nil, &Failure{"catalog_too_large", fmt.Sprintf("search exceeds %d candidate tools", discovery.MaxRankTools), "Scope the search to one server."}
 			}
 			tools = append(tools, discovery.Tool{ID: r.name + "." + name, Server: r.name, Definition: t})
 		}
@@ -175,6 +175,9 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 			ranked = append(ranked, discovery.Match{Tool: t})
 		}
 	} else if opt.Query != "" {
+		if !discovery.WithinLimits(len(tools), opt.Query) {
+			return nil, &Failure{"catalog_too_large", "search query and catalog exceed the ranking limits", "Use a shorter query or scope the search to one server."}
+		}
 		ranked = discovery.Rank(tools, opt.Query)
 	}
 	n := len(ranked)
