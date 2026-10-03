@@ -40,32 +40,6 @@ the private identity key or device registry to clients. Supply `--tls-cert` and
 `--tls-key` to use your own certificate; clients still verify it by the displayed
 fingerprint during pairing.
 
-For compatibility, setting `TAP_REMOTE_TOKEN` selects the legacy bearer-token
-mode instead. Do not put the token itself in command-line arguments or commit it
-to configuration. For a local connection or a TLS reverse proxy's private backend:
-
-```sh
-export TAP_REMOTE_TOKEN='your-random-token'
-tap remote serve --addr 127.0.0.1:8765
-```
-
-In legacy token mode, access from other machines can use HTTPS itself with your
-certificate and private key:
-
-```sh
-tap remote serve --addr 0.0.0.0:8765 \
-  --tls-cert /etc/tap/cert.pem --tls-key /etc/tap/key.pem
-```
-
-In legacy token mode, the certificate must be trusted by clients and valid for the
-remote's hostname. Open the port in your firewall as appropriate. A reverse proxy
-can terminate public TLS instead and forward to the loopback HTTP listener.
-
-Non-loopback plaintext listeners in legacy token mode require explicit
-`--allow-insecure` on both ends. This is only for trusted networks or private proxy
-backends: bearer tokens and tool data travel in plaintext. Paired mode always uses
-TLS and does not permit plaintext.
-
 The serving machine itself doesn't select the remote: it already reads its
 connectors locally, and an address bound to a LAN or VPN interface may not be
 reachable from the host that binds it. Leave the serving machine on its local
@@ -73,25 +47,13 @@ registry.
 
 ## Save and select remotes
 
-Give the local tap process the token through its environment, including the
-environment of the harness that spawns it:
+Pair each client with `tap remote pair NAME https://HOST:8443`, then select it with
+`tap remote use NAME`. Use `tap remote list` to see saved devices and
+`tap remote remove NAME` to remove a local profile. `tap remote off` returns to the
+local registry without deleting saved profiles.
 
-```sh
-export TAP_REMOTE_TOKEN='your-random-token'
-tap remote add home https://tap.example.com:8765
-tap remote use home
-tap search 'read file'
-```
-
-Save several endpoints with `tap remote add NAME URL`, see them with `tap remote list`,
-and select one with `tap remote use NAME`. Profiles store the URL and token-variable name,
-never the token itself. The older `tap remote use URL` form remains available for one-off
-selection without a named profile. `tap remote remove NAME` removes a saved profile; `tap
-remote off` returns to the local registry without deleting saved profiles.
-
-For a local deployment, use `http://127.0.0.1:8765`. `--token-env NAME` selects
-another environment variable instead of `TAP_REMOTE_TOKEN`. Configuration stores
-the variable's name, not its secret value.
+Existing token based remote profiles cannot connect to this server. Pair again with
+the same profile name to replace one; the saved name is retained.
 
 Harness configurations do not change: `claude mcp add --scope user tap -- tap`,
 Codex's `command = "tap"`, or OpenCode's local `command: ["tap"]` still work.
@@ -132,19 +94,15 @@ silent switch to a similarly named local tool.
 
 ## Credentials and trust
 
-The default token authorizes both execution and administration. For agents that
-should call tools but not add executable commands, set a distinct
-`TAP_REMOTE_ADMIN_TOKEN` on the remote and give them only `TAP_REMOTE_TOKEN`.
-Administrative CLI commands must then use the admin credential; an administrator
-can set `TAP_REMOTE_ADMIN_TOKEN` on their client, which `add` and `remove` use
-instead of the execution token. Ordinary agents should not receive that variable.
+Execution pairing grants tool access. Use `tap remote pair --role admin` only on
+devices that need to add or remove shared servers or manage sign-in. Ordinary agent
+devices should use the execution role.
 
 HTTP results preserve fields supported by the MCP SDK, including content,
 structured output and application metadata. Unknown protocol extensions are not
 an opaque byte-for-byte relay.
 
-The listener defaults to `127.0.0.1:7777`; examples use an explicit port so you
-can choose one appropriate for your deployment.
+The listener defaults to `0.0.0.0:8443`; pass `--addr` to bind a different address.
 
 `tap config` always reads and changes settings for this local tap installation. It does not
 configure the selected remote host. `tap import` is local-only because it reads this machine's

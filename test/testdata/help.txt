@@ -43,9 +43,8 @@ Flags
       --local    use this machine's servers while a remote is selected
 
 Environment
-  TAP_CONFIG        the config file (default ~/.tap/servers.json)
-  TAP_REMOTE_TOKEN  the token a remote and its clients share
-  NO_COLOR          set to print help without bold headings
+  TAP_CONFIG  the config file (default ~/.tap/servers.json)
+  NO_COLOR    set to print help without bold headings
   Some settings have variables of their own; see "tap config --help".
 
 Run "tap COMMAND --help" for a command's examples and flags.

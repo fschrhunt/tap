@@ -1450,8 +1450,6 @@ func (s *shell) remote(args []string) (int, error) {
 	addr := fs.String("addr", "", "")
 	cert := fs.String("tls-cert", "", "")
 	key := fs.String("tls-key", "", "")
-	tokenEnv := fs.String("token-env", "TAP_REMOTE_TOKEN", "")
-	insecure := fs.Bool("allow-insecure", false, "")
 	check := fs.Bool("check", false, "")
 	role := fs.String("role", "execution", "")
 	args, err := parse("remote", fs, args)
@@ -1464,21 +1462,7 @@ func (s *shell) remote(args []string) (int, error) {
 			return 2, wrong("remote", "remote serve takes only flags; \"%s\" is not one", args[0])
 		}
 		s.hint("Serving this machine's local registry; the selected client remote is not used here.")
-		return 0, remote.Serve(s.ctx, path, version, remote.Options{Addr: *addr, TLSCert: *cert, TLSKey: *key, AllowInsecure: *insecure})
-	case "add":
-		if len(args) != 2 {
-			return 2, wrong("remote", "remote add takes a name and the remote's address")
-		}
-		endpoint, err := config.NormalizeURL(args[1], *insecure)
-		if err != nil {
-			return 1, err
-		}
-		if err := config.SaveRemoteProfile(path, args[0], config.Remote{URL: endpoint, TokenEnv: *tokenEnv, AllowInsecure: *insecure}); err != nil {
-			return 1, err
-		}
-		print(s.out, "saved remote "+args[0]+": "+endpoint, false)
-		s.hint("Select it with \"tap remote use %s\". It is not selected yet.", args[0])
-		return 0, nil
+		return 0, remote.Serve(s.ctx, path, version, remote.Options{Addr: *addr, TLSCert: *cert, TLSKey: *key})
 	case "pair":
 		if len(args) != 2 {
 			return 2, wrong("remote", "remote pair takes a profile name and HTTPS address")
@@ -1521,6 +1505,9 @@ func (s *shell) remote(args []string) (int, error) {
 			_ = config.RemoveRemoteSecret(path, paired.ID)
 			return 1, err
 		}
+		if err = config.SetRemote(path, nil); err != nil {
+			return 1, err
+		}
 		if err = config.SelectRemoteProfile(path, args[0]); err != nil {
 			return 1, err
 		}
@@ -1535,36 +1522,17 @@ func (s *shell) remote(args []string) (int, error) {
 			return 1, err
 		}
 		if profile, ok := profiles.Profiles[args[0]]; ok {
+			if profile.PeerID == "" {
+				return 1, fmt.Errorf("legacy token remotes are no longer supported; pair this device again with \"tap remote pair %s HTTPS_URL\"", args[0])
+			}
 			if err := config.SelectRemoteProfile(path, args[0]); err != nil {
 				return 1, err
 			}
 			print(s.out, "selected remote "+args[0]+": "+profile.URL, false)
-			if profile.PeerID != "" {
-				s.hint("Paired device credentials are stored locally. Run \"tap remote status --check\" to verify reachability.")
-			} else if os.Getenv(profile.TokenEnv) == "" {
-				s.hint("%s is not set here. Set it before using tap.", profile.TokenEnv)
-			} else {
-				s.hint("Run \"tap list\" to see its servers.")
-			}
+			s.hint("Paired device credentials are stored locally. Run \"tap remote status --check\" to verify reachability.")
 			return 0, nil
 		}
-		if !strings.Contains(args[0], "://") {
-			return 1, fmt.Errorf("there is no saved remote named %q. Run \"tap remote list\"", args[0])
-		}
-		endpoint, err := config.NormalizeURL(args[0], *insecure)
-		if err != nil {
-			return 1, err
-		}
-		if err = config.SetRemote(path, &config.Remote{URL: endpoint, TokenEnv: *tokenEnv, AllowInsecure: *insecure}); err != nil {
-			return 1, err
-		}
-		print(s.out, "selected one-off remote: "+endpoint, false)
-		if os.Getenv(*tokenEnv) == "" {
-			s.hint("%s is not set here. Set it to the remote's token before using tap.", *tokenEnv)
-		} else {
-			s.hint("Run \"tap list\" to see the remote's servers.")
-		}
-		return 0, nil
+		return 1, fmt.Errorf("remote addresses must be paired first with \"tap remote pair NAME HTTPS_URL\"")
 	case "off":
 		if len(args) != 0 {
 			return 2, wrong("remote", "remote off takes no arguments")
@@ -1663,9 +1631,9 @@ func (s *shell) remote(args []string) (int, error) {
 			if name != "" {
 				label = "remote " + name
 			}
-			detail := "token env: " + cfg.TokenEnv
-			if cfg.PeerID != "" {
-				detail = "paired device credential"
+			detail := "paired device credential"
+			if cfg.PeerID == "" {
+				detail = "legacy profile; pair this device again to reconnect"
 			}
 			print(s.out, label+": "+cfg.URL+" (configured; reachability not checked; "+detail+")", false)
 			if *check {
@@ -1682,10 +1650,10 @@ func (s *shell) remote(args []string) (int, error) {
 		}
 		return 0, nil
 	}
-	if meant := nearest(command, []string{"serve", "add", "pair", "use", "list", "remove", "devices", "revoke", "off", "status"}); meant != "" {
+	if meant := nearest(command, []string{"serve", "pair", "use", "list", "remove", "devices", "revoke", "off", "status"}); meant != "" {
 		return 2, wrong("remote", "remote has no \"%s\". Did you mean \"%s\"?", command, meant)
 	}
-	return 2, wrong("remote", "remote has no \"%s\"; it has serve, add, pair, use, list, remove, devices, revoke, off and status", command)
+	return 2, wrong("remote", "remote has no \"%s\"; it has serve, pair, use, list, remove, devices, revoke, off and status", command)
 }
 
 func hostname() string {
