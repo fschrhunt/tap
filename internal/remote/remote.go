@@ -52,34 +52,14 @@ func validCallback(raw string) bool {
 	return err == nil && u.Scheme == "http" && config.Loopback(u.Hostname()) && u.Port() != "" && u.Path == "/callback" && u.RawQuery == "" && u.Fragment == "" && u.User == nil
 }
 
-func matchesToken(authorization, token string) bool {
-	if token == "" {
-		return false
-	}
-	got := sha256.Sum256([]byte(authorization))
-	want := sha256.Sum256([]byte("Bearer " + token))
-	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
-}
-
 // Options controls the listener address and optional TLS identity.
 type Options struct {
 	Addr, TLSCert, TLSKey string
 }
 
-// Handler exposes authenticated MCP and write-only server administration.
-func Handler(path, version, token, adminToken string) (http.Handler, func(), error) {
-	if token == "" {
-		return nil, nil, fmt.Errorf("TAP_REMOTE_TOKEN must be set")
-	}
-	return handler(path, version, token, adminToken, nil)
-}
-
-func handler(path, version, token, adminToken string, devices *deviceManager) (http.Handler, func(), error) {
-	if token == "" && devices == nil {
+func handler(path, version string, devices *deviceManager) (http.Handler, func(), error) {
+	if devices == nil {
 		return nil, nil, fmt.Errorf("a remote execution credential is required")
-	}
-	if adminToken == "" {
-		adminToken = token
 	}
 	e := registry.New(path, version)
 	s, err := server.New(hostedBackend{e}, version, e.Settings())
@@ -358,14 +338,12 @@ func handler(path, version, token, adminToken string, devices *deviceManager) (h
 		}
 		if !publicPairing {
 			authorization := r.Header.Get("Authorization")
-			execution := matchesToken(authorization, token)
-			administration := matchesToken(authorization, adminToken)
 			role := ""
 			if devices != nil && strings.HasPrefix(authorization, "Bearer ") {
 				role = devices.role(strings.TrimPrefix(authorization, "Bearer "))
 			}
 			adminRoute := r.URL.Path == "/servers" || strings.HasPrefix(r.URL.Path, "/signin/")
-			if adminRoute && !administration && role != "admin" || !adminRoute && !execution && !administration && role == "" {
+			if adminRoute && role != "admin" || !adminRoute && role == "" {
 				http.Error(w, "unauthorized", 401)
 				return
 			}
@@ -421,7 +399,7 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 	var cleanup func()
 	devices, err = newDeviceManager(path, opts.TLSCert, opts.TLSKey)
 	if err == nil {
-		h, cleanup, err = handler(path, version, "", "", devices)
+		h, cleanup, err = handler(path, version, devices)
 	}
 	if err != nil {
 		return err

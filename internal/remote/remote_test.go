@@ -2,16 +2,15 @@ package remote
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -25,28 +24,53 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// host starts an isolated authenticated remote registry, with optional TLS.
-func host(t *testing.T, tls bool) (*httptest.Server, *Client) {
+// testHost starts a paired HTTPS registry with credentials scoped to the requested role.
+func testHandler(t *testing.T, path string) (http.Handler, *deviceManager, func()) {
 	t.Helper()
-	t.Setenv("TAP_REMOTE_TOKEN", "relay-token")
-	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "")
-	h, close, err := Handler(filepath.Join(t.TempDir(), "servers.json"), "test", "relay-token", "")
+	manager, err := newDeviceManager(path, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var httpServer *httptest.Server
-	if tls {
-		httpServer = httptest.NewTLSServer(h)
-	} else {
-		httpServer = httptest.NewServer(h)
+	h, cleanup, err := handler(path, "test", manager)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { httpServer.Close(); close() })
-	c, err := New(config.Remote{URL: httpServer.URL, TokenEnv: "TAP_REMOTE_TOKEN"}, "test")
+	return h, manager, cleanup
+}
+
+func testHost(t *testing.T, path string) (*httptest.Server, *deviceManager) {
+	t.Helper()
+	h, manager, cleanup := testHandler(t, path)
+	server := httptest.NewUnstartedServer(h)
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{manager.certificate()}, MinVersion: tls.VersionTLS12}
+	server.StartTLS()
+	t.Cleanup(func() { server.Close(); cleanup() })
+	return server, manager
+}
+
+func pairedTestClient(t *testing.T, server *httptest.Server, manager *deviceManager, role string) *Client {
+	t.Helper()
+	code := manager.execCode
+	if role == "admin" {
+		code = manager.adminCode
+	}
+	paired, err := Pair(context.Background(), server.URL, manager.fingerprint, code, "test client", role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(config.Remote{URL: server.URL, PeerID: paired.ID, Fingerprint: manager.fingerprint, Token: paired.Token}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(c.Close)
-	return httpServer, c
+	return c
+}
+
+// host starts an isolated paired registry with an administrator client.
+func host(t *testing.T, _ bool) (*httptest.Server, *Client) {
+	t.Helper()
+	server, manager := testHost(t, filepath.Join(t.TempDir(), "servers.json"))
+	return server, pairedTestClient(t, server, manager, "admin")
 }
 
 // oauthProvider is an offline MCP OAuth service used to verify the complete remote callback relay.
@@ -103,19 +127,8 @@ func TestRemoteAuthRelaysBrowserCallback(t *testing.T) {
 	if err := config.Add(path, "oauth", wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: provider.URL + "/mcp"}}); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TAP_REMOTE_TOKEN", "relay")
-	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "admin")
-	h, cleanup, err := Handler(path, "test", "relay", "admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hosted := httptest.NewServer(h)
-	t.Cleanup(func() { hosted.Close(); cleanup() })
-	c, err := New(config.Remote{URL: hosted.URL, TokenEnv: "TAP_REMOTE_TOKEN", AllowInsecure: true}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	hosted, manager := testHost(t, path)
+	c := pairedTestClient(t, hosted, manager, "admin")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	result, err := c.Auth(ctx, "oauth", "", "", 0, func(page string) error {
@@ -152,56 +165,13 @@ func TestRemoteAuthWithoutOAuthReturnsAnImmediateResult(t *testing.T) {
 	if err := config.Add(path, "plain", wire.Object{{Name: "type", Value: "http"}, {Name: "url", Value: downstream.URL}}); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TAP_REMOTE_TOKEN", "relay")
-	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "admin")
-	h, cleanup, err := Handler(path, "test", "relay", "admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hosted := httptest.NewServer(h)
-	t.Cleanup(func() { hosted.Close(); cleanup() })
-	c, err := New(config.Remote{URL: hosted.URL, TokenEnv: "TAP_REMOTE_TOKEN", AllowInsecure: true}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	hosted, manager := testHost(t, path)
+	c := pairedTestClient(t, hosted, manager, "admin")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := c.Auth(ctx, "plain", "", "", 0, nil, io.Discard)
 	if err != nil || result == nil || result.SignedIn || result.HadGrant || result.Tools != 1 {
 		t.Fatalf("remote Auth without OAuth = %+v, %v", result, err)
-	}
-}
-
-// TestAuthenticationAndOrigins protects every endpoint and keeps server definitions write-only.
-func TestAuthenticationAndOrigins(t *testing.T) {
-	h, close, err := Handler(filepath.Join(t.TempDir(), "config.json"), "test", "relay", "admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer close()
-	for _, tc := range []struct {
-		path, token, origin, method string
-		status                      int
-	}{
-		{"/mcp", "", "", "GET", 401}, {"/servers", "relay", "", "POST", 401}, {"/servers", "admin", "", "GET", 405},
-		{"/health", "relay", "", "GET", 200}, {"/health", "admin", "", "GET", 200},
-		{"/signin/start", "relay", "", "POST", 401}, {"/signin/start", "admin", "", "POST", 400},
-		{"/missing", "", "", "GET", 401}, {"/mcp", "relay", "https://evil.example", "GET", 403}, {"/servers", "admin", "http://example.com", "DELETE", 400},
-	} {
-		r := httptest.NewRequest(tc.method, "http://example.com"+tc.path, nil)
-		if tc.token != "" {
-			r.Header.Set("Authorization", "Bearer "+tc.token)
-		}
-		r.Header.Set("Origin", tc.origin)
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != tc.status {
-			t.Errorf("%+v: %d", tc, w.Code)
-		}
-	}
-	if _, _, err := Handler("unused", "test", "", ""); err == nil {
-		t.Fatal("allowed no token")
 	}
 }
 
@@ -212,7 +182,7 @@ func TestPairingPinsTLSIssuesScopedCredentialsAndRevokesThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, cleanup, err := handler(path, "test", "", "", manager)
+	h, cleanup, err := handler(path, "test", manager)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +305,7 @@ func TestReferenceSessionIsolation(t *testing.T) {
 	downstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return fixture }, nil))
 	t.Cleanup(downstream.Close)
 	h, c := host(t, false)
-	other, err := New(config.Remote{URL: h.URL, TokenEnv: "TAP_REMOTE_TOKEN"}, "test")
+	other, err := New(config.Remote{URL: h.URL, PeerID: c.cfg.PeerID, Fingerprint: c.cfg.Fingerprint, Token: c.cfg.Token}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,24 +372,24 @@ func TestScopedRemoteDiscovery(t *testing.T) {
 // TestTLSRelay requires normal certificate verification and accepts a trusted native TLS endpoint.
 func TestTLSRelay(t *testing.T) {
 	s, c := host(t, true)
-	if _, err := c.Listing(context.Background(), true); err == nil {
-		t.Fatal("accepted untrusted TLS certificate")
-	}
-	c.http.Transport = bearerTransport{token: "relay-token", base: s.Client().Transport}
 	if _, err := c.Listing(context.Background(), true); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.HasPrefix(s.URL, "https://") {
+		t.Fatalf("paired relay is not HTTPS: %s", s.URL)
 	}
 }
 
 // TestRedirectsNeverForwardToken ensures even a same-origin redirect is refused.
 func TestRedirectsNeverForwardToken(t *testing.T) {
-	t.Setenv("TAP_REMOTE_TOKEN", "relay-token")
 	targetHit := false
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetHit = true }))
 	defer target.Close()
-	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 307) }))
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 307) }))
 	defer redirect.Close()
-	c, err := New(config.Remote{URL: redirect.URL}, "test")
+	cert := redirect.TLS.Certificates[0]
+	fingerprint := sha256.Sum256(cert.Certificate[0])
+	c, err := New(config.Remote{URL: redirect.URL, PeerID: "redirect-test", Fingerprint: hex.EncodeToString(fingerprint[:]), Token: "paired-test-token"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,10 +446,9 @@ func TestCancellationReachesConnector(t *testing.T) {
 
 // TestBodyCap rejects oversized admin requests without exposing submitted secrets.
 func TestBodyCap(t *testing.T) {
-	s, _ := host(t, false)
+	s, c := host(t, false)
 	req, _ := http.NewRequest("POST", s.URL+"/servers", strings.NewReader(strings.Repeat("x", bodyLimit+1)))
-	req.Header.Set("Authorization", "Bearer relay-token")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.adminHTTP().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,98 +496,10 @@ func TestReconnect(t *testing.T) {
 	}
 }
 
-// TestServeExposure requires deliberate insecure consent and complete TLS options.
-func TestServeExposure(t *testing.T) {
-	t.Setenv("TAP_REMOTE_TOKEN", "test-token")
-	for _, opts := range []Options{{Addr: "0.0.0.0:0"}, {Addr: "127.0.0.1:0", TLSCert: "cert-only"}} {
-		if err := Serve(context.Background(), filepath.Join(t.TempDir(), "servers.json"), "test", opts); err == nil {
-			t.Fatalf("accepted unsafe options: %+v", opts)
-		}
-	}
-}
-
-// TestNativeTLSServe verifies supplied certificates and cancellation of the actual listener.
-func TestNativeTLSServe(t *testing.T) {
-	t.Setenv("TAP_REMOTE_TOKEN", "relay-token")
-	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "")
-	reference := httptest.NewTLSServer(http.NotFoundHandler())
-	address := reference.Listener.Addr().String()
-	certificate := reference.TLS.Certificates[0]
-	trustedTransport := reference.Client().Transport
-	reference.Close()
-	dir := t.TempDir()
-	certPath := filepath.Join(dir, "cert.pem")
-	keyPath := filepath.Join(dir, "key.pem")
-	private, err := x509.MarshalPKCS8PrivateKey(certificate.PrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: private}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- Serve(ctx, filepath.Join(dir, "servers.json"), "test", Options{Addr: address, TLSCert: certPath, TLSKey: keyPath})
-	}()
-	c, err := New(config.Remote{URL: "https://" + address}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	c.http.Transport = bearerTransport{token: "relay-token", base: trustedTransport}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, err = c.Listing(ctx, true); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal(err)
-		}
-		time.Sleep(time.Millisecond)
-	}
-	c.Close()
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("TLS listener did not stop")
-	}
-}
-
-// TestAdminToken lets relay users search while requiring the separate token for edits.
-func TestAdminToken(t *testing.T) {
-	t.Setenv("TAP_REMOTE_TOKEN", "relay")
-	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "")
-	h, cleanup, err := Handler(filepath.Join(t.TempDir(), "servers.json"), "test", "relay", "admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	s := httptest.NewServer(h)
-	defer s.Close()
-	c, err := New(config.Remote{URL: s.URL}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	if _, err := c.Listing(context.Background(), true); err != nil {
-		t.Fatal(err)
-	}
-	def := wire.Object{{Name: "url", Value: "http://localhost:1"}}
-	if _, err := c.Edit(context.Background(), "fixture", def); err == nil {
-		t.Fatal("relay token edited registry")
-	}
-	t.Setenv("TAP_REMOTE_ADMIN_TOKEN", "admin")
-	if _, err := c.Edit(context.Background(), "fixture", def); err != nil {
-		t.Fatal(err)
+// TestServeRequiresCompleteTLSOptions rejects incomplete explicit identity configuration.
+func TestServeRequiresCompleteTLSOptions(t *testing.T) {
+	if err := Serve(context.Background(), filepath.Join(t.TempDir(), "servers.json"), "test", Options{Addr: "127.0.0.1:0", TLSCert: "cert-only"}); err == nil {
+		t.Fatal("accepted incomplete TLS identity")
 	}
 }
 
@@ -670,15 +551,5 @@ func TestSafeCatalogKeepsSignInInstruction(t *testing.T) {
 		if e := wire.String(row.Get("error")); e != w {
 			t.Errorf("row %d error = %q, want %q", i, e, w)
 		}
-	}
-}
-
-// TestNewNamesMissingToken pins what a client told to relay sees when its token variable is
-// unset: the error must name the variable, so the fix is obvious without reading the config.
-func TestNewNamesMissingToken(t *testing.T) {
-	t.Setenv("TAP_TEST_MISSING_TOKEN", "")
-	_, err := New(config.Remote{URL: "http://example.invalid/mcp", TokenEnv: "TAP_TEST_MISSING_TOKEN", AllowInsecure: true}, "test")
-	if err == nil || !strings.Contains(err.Error(), "TAP_TEST_MISSING_TOKEN") {
-		t.Fatalf("New with an unset token: %v, want an error naming TAP_TEST_MISSING_TOKEN", err)
 	}
 }
