@@ -23,7 +23,7 @@ func TestInitializationWaitersCancelIndependently(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var requests atomic.Int32
 	host := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && requests.Add(1) == 1 {
+		if r.URL.Path == "/mcp" && r.Method == http.MethodPost && requests.Add(1) == 1 {
 			close(entered)
 			select {
 			case <-release:
