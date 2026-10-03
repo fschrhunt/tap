@@ -411,7 +411,7 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 	paired := token == ""
 	if opts.Addr == "" {
 		if paired {
-			opts.Addr = "0.0.0.0:45829"
+			opts.Addr = "0.0.0.0:8443"
 		} else {
 			opts.Addr = "127.0.0.1:7777"
 		}

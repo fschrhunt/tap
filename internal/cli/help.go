@@ -103,8 +103,8 @@ var topics = []topic{
 		about: "Without TAP_REMOTE_TOKEN, serve starts paired-device HTTPS with a one-time code and\n" +
 			"certificate fingerprint. Otherwise it uses the legacy bearer-token mode. Saved profiles\n" +
 			"select the default target for ordinary registry commands.",
-		examples: []string{"tap remote serve", "tap remote pair home https://tap-host:45829", "tap remote devices", "tap remote add home https://tap.example.com:8765", "tap remote use home", "tap remote status --check", "tap remote off"},
-		flags: [][2]string{{"    --addr HOST:PORT", "where serve listens (paired default 0.0.0.0:45829; token mode 127.0.0.1:7777)"}, {"    --tls-cert FILE, --tls-key FILE", "serve with this certificate; paired mode pins its fingerprint"},
+		examples: []string{"tap remote serve", "tap remote pair home https://tap-host:8443", "tap remote devices", "tap remote add home https://tap.example.com:8765", "tap remote use home", "tap remote status --check", "tap remote off"},
+		flags: [][2]string{{"    --addr HOST:PORT", "where serve listens (paired default 0.0.0.0:8443; token mode 127.0.0.1:7777)"}, {"    --tls-cert FILE, --tls-key FILE", "serve with this certificate; paired mode pins its fingerprint"},
 			{"    --role execution|admin", "paired device permissions (default execution)"}, {"    --token-env VARIABLE", "the variable holding the token (default TAP_REMOTE_TOKEN)"},
 			{"    --allow-insecure", "allow plain HTTP beyond this machine in token mode"}, {"    --check", "check remote reachability with the configured credential"}}},
 	{name: "config", group: "Other", summary: "show or change tap's settings", page: "settings.md",

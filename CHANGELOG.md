@@ -23,6 +23,7 @@
 - `tap remote serve` can enroll devices over TLS with a manually verified certificate
   fingerprint, one-time role-scoped codes, per-device revocation and optional mDNS
   discovery. Paired-device credentials stay in owner-only files; token mode remains available.
+- Paired-device HTTPS now listens on port 8443 by default; token mode remains on loopback port 7777.
 
 ## v1.0.2 · 2026-10-02
 

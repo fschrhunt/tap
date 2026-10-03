@@ -18,14 +18,14 @@ tap add files -- npx -y @modelcontextprotocol/server-filesystem /srv/notes
 tap add docs https://docs.example.com/mcp --bearer-token-env DOCS_TOKEN
 ```
 
-By default, `tap remote serve` starts paired-device HTTPS on port `45829`, bound
+By default, `tap remote serve` starts paired-device HTTPS on port `8443`, bound
 to all interfaces. It creates a persistent self-signed identity and prints its
 SHA-256 fingerprint plus separate, single-use admin and execution pairing codes.
 The codes expire after 15 minutes. Pairing codes are credentials: show them only
 to people you intend to authorize. mDNS advertises the service when available,
 but discovery does not authenticate or trust the host.
 
-On each client, run `tap remote pair NAME https://HOST:45829`. The client shows
+On each client, run `tap remote pair NAME https://HOST:8443`. The client shows
 the certificate fingerprint it observed; compare it with the fingerprint on the
 serving machine before continuing, then enter the one-time execution code. Pairing
 uses TLS pinned to that exact certificate, and the device token is stored in an
