@@ -116,7 +116,8 @@ func (s *resultStore) retainScoped(ctx context.Context, server string, result wi
 	return wire.Object{{Name: "content", Value: []any{wire.Object{{Name: "type", Value: "text"}, {Name: "text", Value: string(text)}}}}, {Name: "structuredContent", Value: preview}, {Name: "isError", Value: result.Get("isError") == true}}
 }
 
-// get copies a live result so callers cannot mutate retained data or race deletion.
+// get lends immutable raw bytes; deletion cannot invalidate a caller's slice.
+// Callers must decode before mutation and never write into the retained bytes.
 func (s *resultStore) get(id string) (storedResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -125,7 +126,6 @@ func (s *resultStore) get(id string) (storedResult, error) {
 	if !ok {
 		return storedResult{}, &Failure{"reference_unavailable", "result reference is unknown, expired or evicted", "References are session-only. Do not repeat a write merely to recreate its result."}
 	}
-	v.raw = append([]byte(nil), v.raw...)
 	return v, nil
 }
 
@@ -259,12 +259,19 @@ func selectPointer(value any, p string) (any, error) {
 	return value, nil
 }
 
-// resolveReferences copies explicitly authorized values before final schema validation.
+// resolveReferences decodes each immutable result once and caps cumulative expanded
+// argument bytes at 8 MiB before attaching copies and final schema validation.
 func (e *Engine) resolveReferences(ctx context.Context, target string, args any, refs []ArgumentReference, servers wire.Object) (any, error) {
-	b, err := wire.JSON(args, false)
+	b, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
 	}
+	if len(refs) > 128 || len(b) > maxResultBytes {
+		return nil, &Failure{"arguments_too_large", "argument expansion exceeds 128 references or 8 MiB", "Use fewer references or smaller arguments."}
+	}
+	expanded := len(b)
+	decoded := map[string]any{}
+	decodedBytes := 0
 	plain, err := decodeResult(b)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments")
@@ -295,11 +302,36 @@ func (e *Engine) resolveReferences(ctx context.Context, target string, args any,
 		if err = checkReferenceFlow(def, stored.server, target); err != nil {
 			return nil, err
 		}
-		value, err := decodeResult(stored.raw)
+		value, loaded := decoded[ref.Reference]
+		if !loaded {
+			if len(stored.raw) > maxStoredBytes-decodedBytes {
+				return nil, &Failure{"arguments_too_large", "referenced source data exceeds 32 MiB", "Use fewer retained results."}
+			}
+			value, err = decodeResult(stored.raw)
+			if err != nil {
+				return nil, err
+			}
+			decoded[ref.Reference] = value
+			decodedBytes += len(stored.raw)
+		}
+		value, err = selectPointer(value, ref.Pointer)
 		if err != nil {
 			return nil, err
 		}
-		value, err = selectPointer(value, ref.Pointer)
+		selected, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		targetBytes, err := json.Marshal(ref.Target)
+		if err != nil {
+			return nil, err
+		}
+		if len(selected)+len(targetBytes)+2 > maxResultBytes-expanded {
+			return nil, &Failure{"arguments_too_large", "expanded arguments exceed 8 MiB", "Select smaller values or use fewer references."}
+		}
+		expanded += len(selected) + len(targetBytes) + 2
+		// Detach the selected value: later target assignments must not mutate the decoded source.
+		value, err = decodeResult(selected)
 		if err != nil {
 			return nil, err
 		}

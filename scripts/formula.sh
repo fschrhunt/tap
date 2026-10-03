@@ -1,6 +1,7 @@
 #!/bin/sh
 # Writes tap.rb, the Homebrew formula that installs a release's binary, from the release's
-# checksums.txt. The release workflow runs it after publishing; tap's repository is its own tap:
+# checksums.txt. Tags and digests are strictly validated before emitting Ruby literals.
+# The release workflow runs it after publishing; tap's repository is its own tap:
 #
 #   brew tap fschrhunt/tap https://github.com/fschrhunt/tap && brew install fschrhunt/tap/tap
 #
@@ -8,10 +9,22 @@
 set -eu
 tag=$1
 sums=$2
-sha() { grep " tap_${tag}_$1.tar.gz\$" "$sums" | cut -d' ' -f1; }
+case $tag in *[!v0-9.]* | '') echo 'formula.sh: invalid release tag' >&2; exit 1 ;; esac
+printf '%s\n' "$tag" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo 'formula.sh: expected vX.Y.Z' >&2; exit 1; }
+# Exact filename equality, one entry, and exactly 64 hexadecimal digest characters.
+sha() {
+  LC_ALL=C awk -v file="tap_${tag}_$1.tar.gz" '
+    $2 == file {
+      count++
+      if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/) bad = 1
+      digest = $1
+    }
+    END { if (count != 1 || bad) exit 1; print digest }
+  ' "$sums"
+}
 url() { echo "https://github.com/fschrhunt/tap/releases/download/$tag/tap_${tag}_$1.tar.gz"; }
 for target in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do
-  [ -n "$(sha "$target")" ] || { echo "formula.sh: no checksum for $target in $sums" >&2; exit 1; }
+  sha "$target" >/dev/null || { echo "formula.sh: invalid or duplicate checksum for $target" >&2; exit 1; }
 done
 cat <<RUBY
 # frozen_string_literal: true
@@ -29,23 +42,23 @@ class Tap < Formula
 
   on_macos do
     on_arm do
-      url "$(url darwin_arm64)"
-      sha256 "$(sha darwin_arm64)"
+      url '$(url darwin_arm64)'
+      sha256 '$(sha darwin_arm64)'
     end
     on_intel do
-      url "$(url darwin_amd64)"
-      sha256 "$(sha darwin_amd64)"
+      url '$(url darwin_amd64)'
+      sha256 '$(sha darwin_amd64)'
     end
   end
 
   on_linux do
     on_arm do
-      url "$(url linux_arm64)"
-      sha256 "$(sha linux_arm64)"
+      url '$(url linux_arm64)'
+      sha256 '$(sha linux_arm64)'
     end
     on_intel do
-      url "$(url linux_amd64)"
-      sha256 "$(sha linux_amd64)"
+      url '$(url linux_amd64)'
+      sha256 '$(sha linux_amd64)'
     end
   end
 
@@ -60,7 +73,7 @@ class Tap < Formula
   end
 
   test do
-    assert_equal "$tag", shell_output("#{bin}/tap --version").strip
+    assert_equal '$tag', shell_output("#{bin}/tap --version").strip
   end
 end
 RUBY

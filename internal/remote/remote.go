@@ -50,7 +50,40 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 	go e.Warm()
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{MaxRequestBodyBytes: bodyLimit, SessionTimeout: 30 * time.Minute, PropagateRequestCancellation: true})
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", mcpHandler)
+	// Serialize admissions so simultaneous initializations cannot exceed the session cap.
+	var admission sync.Mutex
+	admissions, stopAdmissions := context.WithCancel(context.Background())
+	closed := false
+	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" {
+			if !admission.TryLock() {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "session initialization busy", http.StatusTooManyRequests)
+				return
+			}
+			defer admission.Unlock()
+			// Shutdown cancels a headerless call before waiting for its admission lock.
+			ctx, cancel := context.WithCancel(r.Context())
+			stop := context.AfterFunc(admissions, cancel)
+			defer stop()
+			defer cancel()
+			r = r.WithContext(ctx)
+			if closed {
+				http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+				return
+			}
+			n := 0
+			for range s.Sessions() {
+				n++
+			}
+			if n >= 64 {
+				w.Header().Set("Retry-After", "60")
+				http.Error(w, "MCP session limit reached; close an unused session", http.StatusTooManyRequests)
+				return
+			}
+		}
+		mcpHandler.ServeHTTP(w, r)
+	}))
 	mux.HandleFunc("/servers", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -90,7 +123,9 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 			}
 			err = config.Add(path, name, def)
 		} else {
-			removed, err = config.Remove(path, name)
+			if _, err = auth.Remove(path, name); err == nil {
+				removed, err = config.Remove(path, name)
+			}
 		}
 		if err != nil {
 			http.Error(w, "cannot edit server registry", 500)
@@ -127,6 +162,10 @@ func Handler(path, version, token, adminToken string) (http.Handler, func(), err
 		protected.ServeHTTP(w, r)
 	})
 	return h, func() {
+		stopAdmissions()
+		admission.Lock()
+		defer admission.Unlock()
+		closed = true
 		for session := range s.Sessions() {
 			_ = session.Close()
 		}
@@ -236,7 +275,7 @@ func (t bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return base.RoundTrip(r)
+	return wire.BoundResponse(base.RoundTrip(r))
 }
 
 // connect shares initialization without blocking cancellation or holding a lock during network work.
@@ -279,7 +318,7 @@ func (c *Client) open(pending *initialization) {
 	client := mcp.NewClient(&mcp.Implementation{Name: "tap", Version: c.version}, nil)
 	// The remote's two definitions never change; discovery happens through calls,
 	// so a relay needs no extra persistent notification stream.
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, HTTPClient: c.http, MaxRetries: -1, DisableStandaloneSSE: true}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"})
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, HTTPClient: c.http, MaxRetries: -1, MaxEventSize: wire.MaxMessageBytes, DisableStandaloneSSE: true}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"})
 	if err != nil {
 		err = fmt.Errorf("cannot connect to remote")
 	}

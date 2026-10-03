@@ -266,7 +266,7 @@ func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	for k, v := range t.headers {
 		r.Header[k] = v
 	}
-	return http.DefaultTransport.RoundTrip(r)
+	return wire.BoundResponse(http.DefaultTransport.RoundTrip(r))
 }
 
 // transportFor chooses the SDK transport and configures the child environment. An HTTP server
@@ -322,9 +322,9 @@ func transportFor(path, name string, def wire.Object, quiet bool) (mcp.Transport
 			cmd.Env = append(cmd.Env, f.Name+"="+config.Expand(f.Value))
 		}
 		if !quiet {
-			cmd.Stderr = os.Stderr
+			cmd.Stderr = wire.HumanWriter{Writer: os.Stderr}
 		}
-		return &commandTransport{CommandTransport: &mcp.CommandTransport{Command: cmd, TerminateDuration: 250 * time.Millisecond}, name: config.Home(argv[0])}, nil
+		return &commandTransport{command: cmd, name: config.Home(argv[0])}, nil
 	}
 	if typ != "http" {
 		return nil, fmt.Errorf("server %q has unsupported type %q", name, typ)
@@ -345,7 +345,7 @@ func transportFor(path, name string, def wire.Object, quiet bool) (mcp.Transport
 	if token, ok := def.Get("bearerTokenEnv").(string); ok && os.Getenv(token) != "" {
 		headers.Set("Authorization", "Bearer "+os.Getenv(token))
 	}
-	transport := &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &http.Client{Transport: headerTransport{headers}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1}
+	transport := &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &http.Client{Transport: headerTransport{headers}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1, MaxEventSize: wire.MaxMessageBytes}
 	if headers.Get("Authorization") == "" {
 		transport.OAuthHandler = auth.Handler(path, name, endpoint)
 	}
@@ -610,22 +610,4 @@ func ordered(o wire.Object, names ...string) wire.Object {
 		}
 	}
 	return out
-}
-
-// commandTransport retains familiar spawn diagnostics around the SDK transport.
-type commandTransport struct {
-	*mcp.CommandTransport
-	name string
-}
-
-// Connect reports child setup errors in the original CLI's form.
-func (t *commandTransport) Connect(ctx context.Context) (mcp.Connection, error) {
-	c, err := t.CommandTransport.Connect(ctx)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("spawn %s ENOENT", t.name)
-	}
-	if os.IsPermission(err) {
-		return nil, fmt.Errorf("spawn %s EACCES", t.name)
-	}
-	return c, err
 }

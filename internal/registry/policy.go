@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"path"
+	"strings"
 
 	"github.com/fschrhunt/tap/internal/wire"
 )
@@ -25,8 +26,12 @@ func (f *causedFailure) Error() string { return f.failure.Error() }
 // Unwrap supports both machine-readable gateway recovery and errors.Is for cancellation.
 func (f *causedFailure) Unwrap() []error { return []error{f.failure, f.cause} }
 
-// checkPolicy enforces user-configured tool patterns; backend annotations never grant access.
+// checkPolicy matches path globs only on slash-free names, rejecting unsupported names
+// before any connection. Backend annotations never grant access.
 func checkPolicy(def wire.Object, tool string) error {
+	if strings.Contains(tool, "/") {
+		return &Failure{"permission_denied", "tool names containing / are unsupported", "Use a downstream tool with a slash-free name."}
+	}
 	p, err := policy(def)
 	if err != nil {
 		return err

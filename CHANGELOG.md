@@ -1,5 +1,19 @@
 # tap releases
 
+## Unreleased
+
+- Reject slash-containing downstream tool names so path globs cannot bypass deny policy.
+- Bound downstream HTTP JSON/error bodies (including errors claiming SSE) and SSE events
+  to 16 MiB; gate stdio raw lines (including delimiters) at 16 MiB before JSON validation or SDK decoding. Reject JSON
+  split across lines and preserve bounded child shutdown and spawn diagnostics.
+- Validate release tags and exact SHA-256 digests before generating Homebrew Ruby literals.
+- Cap hosted MCP sessions at 64, serialize admissions, and return HTTP 429 when busy or full.
+- Recheck saved OAuth grants before lending tokens; sign-out and local/remote removal
+  invalidate that server's sessions and catalogs, including across process/re-add boundaries.
+- Bound searches to 4096 query bytes, 32 distinct terms and 65536 candidate tools.
+- Escape terminal controls in human CLI output, diagnostics and downstream stderr.
+- Bound reference expansion to 128 copies / 8 MiB arguments and decode each source once.
+
 ## v1.0.2 · 2026-10-02
 
 - A `list_changed` notification that lands while tap is fetching a server's tools is retried,

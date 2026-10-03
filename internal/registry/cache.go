@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
 	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -72,6 +73,7 @@ type configSnapshot struct {
 	servers      wire.Object
 	fingerprints map[string]string
 	file         os.FileInfo
+	authDigest   string
 }
 
 // settled is how old a config file's modification time must be before an unchanged time and
@@ -80,15 +82,20 @@ type configSnapshot struct {
 const settled = 2 * time.Second
 
 // snapshot runs once per operation and invalidates changed or removed generations. It reads
-// the config again unless the file is the one it last read, unchanged and settled.
+// the config again unless unchanged and settled, and checks owner-only sign-in state
+// every time so removal invalidates sessions and persisted authority across processes.
 func (e *Engine) snapshot() (*configSnapshot, error) {
 	e.snapshotMu.Lock()
 	defer e.snapshotMu.Unlock()
 	if err := e.ctx.Err(); err != nil {
 		return nil, err
 	}
+	authDigest, grants, err := auth.Fingerprints(e.Path)
+	if err != nil {
+		return nil, err
+	}
 	file, statErr := os.Stat(e.Path)
-	if last := e.last; last != nil && statErr == nil && last.file != nil && os.SameFile(file, last.file) &&
+	if last := e.last; last != nil && last.authDigest == authDigest && statErr == nil && last.file != nil && os.SameFile(file, last.file) &&
 		file.Size() == last.file.Size() && file.ModTime().Equal(last.file.ModTime()) && time.Since(file.ModTime()) > settled {
 		return last, nil
 	}
@@ -99,7 +106,7 @@ func (e *Engine) snapshot() (*configSnapshot, error) {
 	}
 	definitions := make(map[string]string, len(servers))
 	for _, f := range servers {
-		definitions[f.Name] = definitionFingerprint(f.Value)
+		definitions[f.Name] = fmt.Sprintf("%x", sha256.Sum256([]byte(definitionFingerprint(f.Value)+"\x00"+grants[f.Name])))
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -125,7 +132,7 @@ func (e *Engine) snapshot() (*configSnapshot, error) {
 	if statErr != nil {
 		file = nil
 	}
-	e.last = &configSnapshot{servers: servers, fingerprints: definitions, file: file}
+	e.last = &configSnapshot{servers: servers, fingerprints: definitions, file: file, authDigest: authDigest}
 	return e.last, nil
 }
 

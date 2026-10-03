@@ -11,6 +11,7 @@ package auth
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fschrhunt/tap/internal/wire"
 	sdk "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
@@ -144,6 +146,28 @@ func Has(configPath, name, endpoint string) bool {
 	return err == nil && s.Servers[name] != nil && s.Servers[name].URL == endpoint
 }
 
+// Fingerprints hashes the owner-only store and each grant for session/catalog invalidation.
+// Invalid stores fail closed; tokens and client secrets never leave as plaintext.
+func Fingerprints(configPath string) (string, map[string]string, error) {
+	s, err := read(Path(configPath))
+	if err != nil {
+		return "", nil, err
+	}
+	grants := make(map[string]string, len(s.Servers))
+	for name, g := range s.Servers {
+		b, err := json.Marshal(g)
+		if err != nil {
+			return "", nil, err
+		}
+		grants[name] = fmt.Sprintf("%x", sha256.Sum256(b))
+	}
+	b, err := json.Marshal(grants)
+	if err != nil {
+		return "", nil, err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b)), grants, nil
+}
+
 // Remove forgets a server's sign-in and reports whether there was one.
 func Remove(configPath, name string) (bool, error) {
 	removed := false
@@ -162,21 +186,29 @@ type source struct {
 	path, name, endpoint string
 	client               *http.Client
 	mu                   sync.Mutex
-	current              *oauth2.Token
 }
 
 // errNone tells the SDK's transport to send the request without a token, so that the
 // server's refusal reaches Handler.Authorize.
 var errNone = &oauth2.RetrieveError{ErrorCode: "invalid_grant", ErrorDescription: "no usable token is saved"}
 
+// Token checks saved authority on every request and serializes renewal across processes.
 func (s *source) Token() (*oauth2.Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.current.Valid() {
-		return s.current, nil
+	st, err := read(s.path)
+	if err != nil {
+		return nil, err
+	}
+	g := st.Servers[s.name]
+	if g == nil || g.URL != s.endpoint || g.Token == nil {
+		return nil, errNone
+	}
+	if g.Token.Valid() {
+		return g.Token, nil
 	}
 	var token *oauth2.Token
-	err := update(s.path, func(st *store) error {
+	err = update(s.path, func(st *store) error {
 		g := st.Servers[s.name]
 		if g == nil || g.URL != s.endpoint || g.Token == nil {
 			return errNone
@@ -205,7 +237,6 @@ func (s *source) Token() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.current = token
 	return token, nil
 }
 
@@ -304,7 +335,7 @@ func Authorize(ctx context.Context, o Options) (*Result, error) {
 				return nil, err
 			}
 			signedIn = true
-			return &source{path: path, name: o.Name, endpoint: o.Endpoint, client: client, current: token}, nil
+			return &source{path: path, name: o.Name, endpoint: o.Endpoint, client: client}, nil
 		},
 	}
 	if o.ClientID != "" {
@@ -336,6 +367,7 @@ func Authorize(ctx context.Context, o Options) (*Result, error) {
 		},
 		OAuthHandler:         flow,
 		MaxRetries:           -1,
+		MaxEventSize:         wire.MaxMessageBytes,
 		DisableStandaloneSSE: true,
 	}, nil)
 	if err != nil {
@@ -403,7 +435,7 @@ func (h headers) RoundTrip(req *http.Request) (*http.Response, error) {
 			r.Header[k] = v
 		}
 	}
-	return http.DefaultTransport.RoundTrip(r)
+	return wire.BoundResponse(http.DefaultTransport.RoundTrip(r))
 }
 
 // explain turns the failures a person can act on into what to do about them.

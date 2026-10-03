@@ -65,7 +65,8 @@ func terminal(w any) bool {
 func Run(ctx context.Context, args []string, version string, stdout, stderr io.Writer) int {
 	e := registry.New(config.Path(), version)
 	defer e.Close()
-	s := &shell{ctx: ctx, engine: e, out: stdout, errOut: stderr, watched: terminal(stderr)}
+	s := &shell{ctx: ctx, engine: e, out: wire.HumanWriter{Writer: stdout}, errOut: wire.HumanWriter{Writer: stderr}, watched: terminal(stderr)}
+	stderr = s.errOut
 	status, err := s.run(append([]string(nil), args...))
 	if err == nil {
 		return status
@@ -105,7 +106,9 @@ func (s *shell) during(message string, work func() error) error {
 	err := work()
 	if !timer.Stop() {
 		<-shown
-		fmt.Fprint(s.errOut, "\r\033[K")
+		if human, ok := s.errOut.(wire.HumanWriter); ok {
+			fmt.Fprint(human.Writer, "\r\033[K")
+		}
 	}
 	return err
 }
@@ -164,9 +167,12 @@ func pairs(command, name string, values []string) (wire.Object, error) {
 	return o, nil
 }
 
-// print writes a value with the JSON indentation and trailing newline tap has always used.
+// print preserves JSON bytes for scripts and uses the human writer for terminal text.
 func print(w io.Writer, value any, json bool) {
 	if json {
+		if human, ok := w.(wire.HumanWriter); ok {
+			w = human.Writer
+		}
 		b, _ := wire.JSON(value, true)
 		fmt.Fprintln(w, string(b))
 	} else {
@@ -599,8 +605,8 @@ func (s *shell) remove(args []string) (int, error) {
 	if relay, ok := backend.(*remote.Client); ok {
 		removed, err = relay.Edit(s.ctx, args[0], nil)
 	} else {
-		if removed, err = config.Remove(s.engine.Path, args[0]); err == nil && removed {
-			_, err = auth.Remove(s.engine.Path, args[0])
+		if _, err = auth.Remove(s.engine.Path, args[0]); err == nil {
+			removed, err = config.Remove(s.engine.Path, args[0])
 		}
 	}
 	if err != nil {

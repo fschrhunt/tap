@@ -68,7 +68,9 @@ saved local registry. See [Remote](remote.md) for listener, TLS and authenticati
 What you asked for is printed on standard output; anything tap says about it, such as an error,
 a hint for what to run next, or a note that it is waiting on the servers, goes to standard
 error. Hints and waiting notes are only written to a terminal, so pipes and logs stay clean.
-Use `--json` in scripts: the text for people may change.
+Use `--json` in scripts: the text for people may change. Human output, diagnostics and
+downstream stderr render terminal controls (including OSC sequences and Unicode format
+controls) as visible escapes, preserving tabs and newlines. JSON output preserves data.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -117,8 +119,9 @@ files.echo
 ```
 
 Words are matched against a tool's name, its server, its title and description, and its
-parameters. A query that is a tool's name or id finds that tool. Otherwise the tools that hold
-every word are printed, best first, and when none holds them all, the tools that hold any.
+parameters. Queries accept at most 4096 bytes and use the first 32 distinct normalized terms;
+scopes over 65536 candidate tools must be narrowed with `--server`. A query that is a tool's name or id finds that tool. Otherwise the tools that hold
+every retained query term are printed, best first, and when none holds them all, the tools that hold any.
 `--server NAME` looks in one server only, and with no query lists that server's tools.
 `--json` shows the input schema too, as the agent gets it:
 
