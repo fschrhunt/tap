@@ -142,7 +142,6 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 func TestAdministrationHasDeadline(t *testing.T) {
 	server, manager := testHost(t, filepath.Join(t.TempDir(), "servers.json"))
 	c := pairedTestClient(t, server, manager, "admin")
-	var err error
 	c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		deadline, ok := r.Context().Deadline()
 		if !ok || time.Until(deadline) > 10*time.Second {
