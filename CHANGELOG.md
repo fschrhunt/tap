@@ -22,7 +22,8 @@
 - Remote `tap add` now reports whether it replaced an existing shared server definition.
 - `tap remote serve` can enroll devices over TLS with a manually verified certificate
   fingerprint, one-time role-scoped codes, per-device revocation and optional mDNS
-  discovery. Paired-device credentials stay in owner-only files; token mode remains available.
+  discovery. Paired-device credentials stay in owner-only files.
+- Remove legacy shared-token serving; `tap remote serve` always uses paired-device HTTPS on port 8443.
 
 ## v1.0.2 · 2026-10-02
 

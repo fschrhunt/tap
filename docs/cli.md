@@ -18,11 +18,10 @@ short introduction instead of waiting for an agent that is not there.
 | `tap search QUERY...` | Find tools, with what is needed to call them |
 | `tap inspect SERVER.TOOL` | Print one tool's whole contract |
 | `tap call SERVER.TOOL [KEY=VALUE]... [--args JSON]` | Call a tool |
-| `tap remote serve` | Host the registry with device pairing or bearer-token auth |
+| `tap remote serve` | Host the registry with paired-device HTTPS |
 | `tap remote pair NAME HTTPS_URL` | Pair this device after manually verifying the host fingerprint |
 | `tap remote devices` | List devices paired to this serving machine |
 | `tap remote revoke DEVICE_ID` | Revoke one paired device on this serving machine |
-| `tap remote add NAME URL` | Save a named remote profile |
 | `tap remote use NAME` | Select a saved remote for CLI commands and stdio relays |
 | `tap remote list` | List saved remote profiles and the selected one |
 | `tap remote remove NAME` | Remove a saved remote profile |

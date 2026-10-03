@@ -52,35 +52,14 @@ func validCallback(raw string) bool {
 	return err == nil && u.Scheme == "http" && config.Loopback(u.Hostname()) && u.Port() != "" && u.Path == "/callback" && u.RawQuery == "" && u.Fragment == "" && u.User == nil
 }
 
-func matchesToken(authorization, token string) bool {
-	if token == "" {
-		return false
-	}
-	got := sha256.Sum256([]byte(authorization))
-	want := sha256.Sum256([]byte("Bearer " + token))
-	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
-}
-
 // Options controls the listener address and optional TLS identity.
 type Options struct {
 	Addr, TLSCert, TLSKey string
-	AllowInsecure         bool
 }
 
-// Handler exposes authenticated MCP and write-only server administration.
-func Handler(path, version, token, adminToken string) (http.Handler, func(), error) {
-	if token == "" {
-		return nil, nil, fmt.Errorf("TAP_REMOTE_TOKEN must be set")
-	}
-	return handler(path, version, token, adminToken, nil)
-}
-
-func handler(path, version, token, adminToken string, devices *deviceManager) (http.Handler, func(), error) {
-	if token == "" && devices == nil {
+func handler(path, version string, devices *deviceManager) (http.Handler, func(), error) {
+	if devices == nil {
 		return nil, nil, fmt.Errorf("a remote execution credential is required")
-	}
-	if adminToken == "" {
-		adminToken = token
 	}
 	e := registry.New(path, version)
 	s, err := server.New(hostedBackend{e}, version, e.Settings())
@@ -359,14 +338,12 @@ func handler(path, version, token, adminToken string, devices *deviceManager) (h
 		}
 		if !publicPairing {
 			authorization := r.Header.Get("Authorization")
-			execution := matchesToken(authorization, token)
-			administration := matchesToken(authorization, adminToken)
 			role := ""
 			if devices != nil && strings.HasPrefix(authorization, "Bearer ") {
 				role = devices.role(strings.TrimPrefix(authorization, "Bearer "))
 			}
 			adminRoute := r.URL.Path == "/servers" || strings.HasPrefix(r.URL.Path, "/signin/")
-			if adminRoute && !administration && role != "admin" || !adminRoute && !execution && !administration && role == "" {
+			if adminRoute && role != "admin" || !adminRoute && role == "" {
 				http.Error(w, "unauthorized", 401)
 				return
 			}
@@ -405,16 +382,10 @@ func handler(path, version, token, adminToken string, devices *deviceManager) (h
 	}, nil
 }
 
-// Serve listens until cancellation, requiring TLS or explicit consent off loopback.
+// Serve exposes the local registry only over paired-device HTTPS until cancellation.
 func Serve(ctx context.Context, path, version string, opts Options) error {
-	token := os.Getenv("TAP_REMOTE_TOKEN")
-	paired := token == ""
 	if opts.Addr == "" {
-		if paired {
-			opts.Addr = "0.0.0.0:45829"
-		} else {
-			opts.Addr = "127.0.0.1:7777"
-		}
+		opts.Addr = "0.0.0.0:8443"
 	}
 	host, _, err := net.SplitHostPort(opts.Addr)
 	if err != nil {
@@ -423,19 +394,12 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 	if (opts.TLSCert == "") != (opts.TLSKey == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be supplied together")
 	}
-	if !paired && !config.Loopback(host) && opts.TLSCert == "" && !opts.AllowInsecure {
-		return fmt.Errorf("nonloopback remote serve requires TLS or --allow-insecure")
-	}
 	var devices *deviceManager
 	var h http.Handler
 	var cleanup func()
-	if paired {
-		devices, err = newDeviceManager(path, opts.TLSCert, opts.TLSKey)
-		if err == nil {
-			h, cleanup, err = handler(path, version, "", "", devices)
-		}
-	} else {
-		h, cleanup, err = Handler(path, version, token, os.Getenv("TAP_REMOTE_ADMIN_TOKEN"))
+	devices, err = newDeviceManager(path, opts.TLSCert, opts.TLSKey)
+	if err == nil {
+		h, cleanup, err = handler(path, version, devices)
 	}
 	if err != nil {
 		return err
@@ -447,22 +411,20 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 	}
 	defer listener.Close()
 	var mdns *zeroconf.Server
-	if paired {
-		if !config.Loopback(host) {
-			_, port, _ := net.SplitHostPort(listener.Addr().String())
-			portNumber, _ := strconv.Atoi(port)
-			mdns, err = zeroconf.Register(devices.name, pairingService, "local.", portNumber,
-				[]string{"id=" + devices.id, "fingerprint=" + devices.fingerprint, "scheme=https"}, nil)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "tap: local-network discovery is unavailable; pairing by address still works")
-			}
+	if !config.Loopback(host) {
+		_, port, _ := net.SplitHostPort(listener.Addr().String())
+		portNumber, _ := strconv.Atoi(port)
+		mdns, err = zeroconf.Register(devices.name, pairingService, "local.", portNumber,
+			[]string{"id=" + devices.id, "fingerprint=" + devices.fingerprint, "scheme=https"}, nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tap: local-network discovery is unavailable; pairing by address still works")
 		}
-		out := human.Writer{W: os.Stderr}
-		fmt.Fprintf(out, "tap remote serve: paired devices only on %s\n", listener.Addr())
-		fmt.Fprintf(out, "Verify this TLS fingerprint on each client: %s\n", devices.fingerprint)
-		fmt.Fprintf(out, "Admin pairing code (valid for 15 minutes): %s\n", devices.adminCode)
-		fmt.Fprintf(out, "Execution-only pairing code (valid for 15 minutes): %s\n", devices.execCode)
 	}
+	out := human.Writer{W: os.Stderr}
+	fmt.Fprintf(out, "tap remote serve: paired devices only on %s\n", listener.Addr())
+	fmt.Fprintf(out, "Verify this TLS fingerprint on each client: %s\n", devices.fingerprint)
+	fmt.Fprintf(out, "Admin pairing code (valid for 15 minutes): %s\n", devices.adminCode)
+	fmt.Fprintf(out, "Execution-only pairing code (valid for 15 minutes): %s\n", devices.execCode)
 	if mdns != nil {
 		defer mdns.Shutdown()
 	}
@@ -476,13 +438,7 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 		case <-done:
 		}
 	}()
-	if paired {
-		err = srv.Serve(tls.NewListener(listener, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{devices.certificate()}}))
-	} else if opts.TLSCert != "" {
-		err = srv.ServeTLS(listener, opts.TLSCert, opts.TLSKey)
-	} else {
-		err = srv.Serve(listener)
-	}
+	err = srv.Serve(tls.NewListener(listener, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{devices.certificate()}}))
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -513,25 +469,19 @@ type initialization struct {
 	err     error
 }
 
-// New validates relay settings and resolves either a paired credential or a legacy environment token.
+// New validates a paired relay and loads its owner-only device credential.
 func New(cfg config.Remote, version string) (*Client, error) {
-	endpoint, err := config.NormalizeURL(cfg.URL, cfg.AllowInsecure)
+	if cfg.PeerID == "" {
+		return nil, fmt.Errorf("legacy token remotes are no longer supported; pair this device with \"tap remote pair NAME HTTPS_URL\"")
+	}
+	endpoint, err := config.NormalizeURL(cfg.URL, false)
 	if err != nil {
 		return nil, err
 	}
 	cfg.URL = endpoint
-	if cfg.TokenEnv == "" && cfg.PeerID == "" {
-		cfg.TokenEnv = "TAP_REMOTE_TOKEN"
-	}
 	token := cfg.Token
-	if token == "" && cfg.PeerID == "" && cfg.TokenEnv != "" {
-		token = os.Getenv(cfg.TokenEnv)
-	}
 	if token == "" {
-		if cfg.PeerID != "" {
-			return nil, fmt.Errorf("paired remote credentials are missing; pair this device again")
-		}
-		return nil, fmt.Errorf("remote token environment variable %s is not set", cfg.TokenEnv)
+		return nil, fmt.Errorf("paired remote credentials are missing; pair this device again")
 	}
 	lifetime, cancel := context.WithCancel(context.Background())
 	base := http.RoundTripper(nil)
@@ -890,20 +840,8 @@ func (c *Client) Edit(ctx context.Context, name string, definition wire.Object) 
 	return out, nil
 }
 
-func (c *Client) adminHTTP() *http.Client {
-	token := c.cfg.Token
-	if c.cfg.PeerID == "" {
-		token = os.Getenv("TAP_REMOTE_ADMIN_TOKEN")
-		if token == "" {
-			token = os.Getenv(c.cfg.TokenEnv)
-		}
-	}
-	var base http.RoundTripper
-	if transport, ok := c.http.Transport.(bearerTransport); ok {
-		base = transport.base
-	}
-	return &http.Client{Transport: bearerTransport{token: token, base: base}, CheckRedirect: c.http.CheckRedirect}
-}
+// adminHTTP uses this device's paired role for protected administration routes.
+func (c *Client) adminHTTP() *http.Client { return c.http }
 
 // Auth relays an OAuth callback through the laptop while keeping registration, exchange and
 // stored credentials on the serving machine.

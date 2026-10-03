@@ -285,17 +285,6 @@ func TestStateChangesAreSaidAndMissingOnesFail(t *testing.T) {
 }
 
 // TestNamedRemoteProfilesCanBeSavedSelectedAndKeptAfterOff pins the multi-target CLI flow.
-func TestNamedRemoteProfilesCanBeSavedSelectedAndKeptAfterOff(t *testing.T) {
-	b := sandbox(t)
-	equal(t, output(t, b.run("remote", "add", "home", "https://tap.home.example:45829")), "saved remote home: https://tap.home.example:45829/mcp")
-	equal(t, output(t, b.run("remote", "add", "work", "https://tap.work.example:45829")), "saved remote work: https://tap.work.example:45829/mcp")
-	equal(t, output(t, b.run("remote", "use", "home")), "selected remote home: https://tap.home.example:45829/mcp")
-	equal(t, output(t, b.run("remote", "list")), "* home  https://tap.home.example:45829/mcp\n- work  https://tap.work.example:45829/mcp")
-	contains(t, output(t, b.run("remote", "status")), "remote home: https://tap.home.example:45829/mcp (configured; reachability not checked;")
-	equal(t, output(t, b.run("remote", "off")), "remote off")
-	equal(t, output(t, b.run("remote", "list")), "- home  https://tap.home.example:45829/mcp\n- work  https://tap.work.example:45829/mcp")
-}
-
 // TestListExplainsUnavailableServers pins the reasons a person reads, without the layers
 // an error passed through.
 func TestListExplainsUnavailableServers(t *testing.T) {
