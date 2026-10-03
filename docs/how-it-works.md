@@ -21,9 +21,11 @@ Ranking uses field-weighted BM25 over identifiers, providers, titles, descriptio
 names/descriptions/enum labels. Unicode tokenization, camelCase splitting, conservative English
 plural normalization, query filler removal and unique one-edit typo recovery reduce missed matches.
 A query that is a tool's name or id, word for word, returns the tools so named. Otherwise the
-tools holding every word of the query are returned, and when none does, the tools holding any.
-No index is built: each query reads the catalogs it is given, which takes under a millisecond for
-hundreds of tools and leaves nothing to prepare before the first search. Scores are not
+tools holding every retained query term are returned, and when none does, the tools holding any.
+Search accepts at most 4096 query bytes, uses the first 32 distinct normalized terms, and
+refuses scopes over 65536 candidate tools; narrow those scopes with `server`. The ranking
+count matrix is bounded to 32 MiB. No index is built: each query reads the catalogs it is given,
+which takes under a millisecond for hundreds of tools and leaves nothing to prepare before the first search. Scores are not
 probabilities. Lexical retrieval cannot reliably infer semantic-only requests such as “notify the
 team”; browse or refine instead.
 
@@ -57,6 +59,14 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
 - **Observability:** integration rows and `catalogs` report `source`, `observedAt`, and `availability`.
   Cached rows use `availability: not_checked`; an unobserved timestamp may be zero for restored
   indexes. Stale matches remain labeled even when a refresh has failed.
+- **Inbound messages:** initialization, tools/list and tools/call are limited before JSON
+  decoding: 16 MiB per HTTP JSON/error body or successful SSE event. Error bodies are
+  bounded even when they claim the SSE content type. For stdio, tap buffers one raw line
+  in bounded fragments, counting all bytes including CR/LF, and rejects oversized lines
+  before JSON validation or decoding. Only a complete JSON value within a single accepted
+  line reaches the SDK; JSON split across lines is refused. A final line at EOF may omit
+  its newline. This covers initialization, tool lists, calls and notifications. Oversized
+  responses fail the connection; after a tool call, its outcome can still be unknown.
 - **Pagination:** tools/list follows at most 100 pages / 16 MiB; repeated cursors and duplicate or
   empty tool names are refused. Tool-change notifications invalidate memory and queue index updates.
 - **Unchanged lists:** each catalog carries a SHA-256 digest of what its server answered. A
@@ -70,6 +80,8 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
   which lets tap find and decode the tools side by side. Corrupt, public, oversized,
   definition-mismatched or differently laid out indexes are ignored. Removing it clears saved metadata, not connectors.
   `TAP_CACHE_DIR=off` disables persistence. Unwritable index directories do not prevent tool use.
+  Fingerprints also hash each server's saved OAuth grant, checked on every operation;
+  sign-out invalidates its saved catalog even across process and remove/re-add boundaries.
   Fingerprints hash expanded connection inputs/credentials; stdio also includes working directory
   and inherited environment. Connection definitions and credentials are not stored in the index.
   Schemas/guidance may still contain sensitive metadata.
@@ -142,6 +154,10 @@ Explicit argument copies avoid model recitation:
 {"tool":"crm.import_records","arguments":{},"argumentRefs":[{"target":"/records","reference":"REFERENCE","pointer":"/structuredContent/rows"}]}
 ```
 
+Argument expansion accepts at most 128 references, charges each selected copy toward an
+8 MiB cumulative argument budget (including ordinary arguments and target names), and decodes
+each source result once. Distinct source payloads may total at most 32 MiB. These conservative
+budgets are checked before attaching copies or calling the backend.
 Targets cannot replace the argument root or overlap. Parent objects/arrays must exist; a final
 object property may be added. Ordinary argument markers are never implicitly interpreted. Copied
 values are schema-validated. Cross-server copies require the **source** server's `policy.referenceTo`

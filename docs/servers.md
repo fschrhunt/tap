@@ -112,7 +112,11 @@ Agents that are already running find the server's tools on their next search.
   `http://127.0.0.1:PORT/callback`, and run `tap auth NAME --client-id ID --port PORT`. For an
   app with a secret, add `--client-secret-file FILE`; the secret is read from the file, never
   from a flag.
-- **Signing out.** `tap auth NAME --remove` forgets the sign-in. `tap remove NAME` does too.
+- **Signing out.** `tap auth NAME --remove` forgets the sign-in. `tap remove NAME` does too,
+  locally and through a remote. Running processes check the owner-only store before lending
+  tokens and invalidate that server's session and catalog on their next operation. Removing
+  and re-adding the same server does not restore its sign-in or authorized catalog. Already
+  sent requests may finish; provider-side token revocation remains a separate action.
 
 `tap list` says when a server is waiting for this:
 
@@ -192,7 +196,9 @@ The equivalent server entry can contain:
 }
 ```
 
-Patterns use Go path globs against the **tool name**, without a server prefix: `*`, `?` and
+Downstream tool names containing `/` are omitted from discovery and refused on calls,
+including with unrestricted policy. This keeps path-glob separators from bypassing deny rules.
+Patterns use Go path globs against the **slash-free tool name**, without a server prefix: `*`, `?` and
 character classes are supported. An absent `allow` means unrestricted; `"allow": []` allows
 nothing. Deny always wins. Invalid policy fields, values and patterns fail closed. A denied call
 does not start a backend. Discovery omits denied tools; upstream catalog counts are not filtered.

@@ -53,6 +53,9 @@ func (e *Engine) Search(ctx context.Context, query string, limit float64, quiet 
 
 // Discover searches or browses scoped catalogs and discloses only the requested detail.
 func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (wire.Object, error) {
+	if len(opt.Query) > discovery.MaxQueryBytes {
+		return nil, &Failure{"invalid_query", "search query exceeds 4096 bytes", "Use a shorter query."}
+	}
 	if opt.Detail == "" {
 		opt.Detail = "auto"
 	}
@@ -141,7 +144,16 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 			row.Set("error", r.err)
 		}
 		catalogs = append(catalogs, row)
-		tools = append(tools, offeredTools(r.name, def, r.tools)...)
+		for _, t := range r.tools {
+			name, _ := t.Get("name").(string)
+			if name == "" || checkPolicy(def, name) != nil {
+				continue
+			}
+			if len(tools) >= discovery.MaxRankTools {
+				return nil, &Failure{"catalog_too_large", "search exceeds 65536 candidate tools", "Scope the search to one server."}
+			}
+			tools = append(tools, discovery.Tool{ID: r.name + "." + name, Server: r.name, Definition: t})
+		}
 	}
 	ranked := []discovery.Match{}
 	if len(opt.IDs) > 0 {
@@ -234,18 +246,6 @@ func (e *Engine) Discover(ctx context.Context, opt SearchOptions, quiet bool) (w
 		return nil, fmt.Errorf("catalog metadata exceeds maxBytes %d; restrict discovery with server or increase maxBytes", opt.MaxBytes)
 	}
 	return out, nil
-}
-
-// offeredTools lists the tools of one server that its policy lets a search show.
-func offeredTools(server string, def wire.Object, tools []wire.Object) []discovery.Tool {
-	out := make([]discovery.Tool, 0, len(tools))
-	for _, t := range tools {
-		name, _ := t.Get("name").(string)
-		if name != "" && checkPolicy(def, name) == nil {
-			out = append(out, discovery.Tool{ID: server + "." + name, Server: server, Definition: t})
-		}
-	}
-	return out
 }
 
 // Warm reads the saved tool lists, so the first search does not wait for them, and starts

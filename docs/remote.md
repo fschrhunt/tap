@@ -112,6 +112,11 @@ an opaque byte-for-byte relay.
 The listener defaults to `127.0.0.1:7777`; examples use an explicit port so you
 can choose one appropriate for your deployment.
 
+The host retains at most 64 active MCP sessions. New session admissions are serialized;
+busy admissions and exhausted capacity return HTTP 429 with `Retry-After`. Close unused
+sessions explicitly; the SDK also cleans up failed initializations and closes sessions after
+30 minutes without client requests. Active calls are not idle-expired.
+
 Both the MCP endpoint (`/mcp`) and the administrative server endpoints are
 authenticated. Clients reject redirects instead of sending credentials to
 another endpoint. The admin API does not publish configured secrets.

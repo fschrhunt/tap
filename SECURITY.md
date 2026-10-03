@@ -11,8 +11,10 @@ you configure.
 
 `tap auth` saves the tokens a sign-in gives it, and the client tap registered as, in `servers.json.auth.json`
 beside the config, with mode `0600`. tap refuses to read the file when group or others can.
-Anyone who can read it can act as you on those servers until you sign out with
-`tap auth NAME --remove` or revoke tap with the provider. Tokens are sent only to the
+Anyone who can read it can act as you on those servers until the provider revokes or expires them.
+`tap auth NAME --remove` stops tap lending the saved sign-in and invalidates its session and
+catalog on the next operation in each running process; it does not revoke tokens at the provider
+or cancel requests already sent. Tokens are sent only to the
 address the sign-in was given for, and never appear in the tool index or in tap's output.
 The sign-in page is opened on the authorization server that the MCP server itself names; check
 the address in your browser before you approve.

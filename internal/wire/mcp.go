@@ -42,7 +42,9 @@ func Take(ctx context.Context) (context.Context, *json.RawMessage) {
 }
 
 // Transport decorates an SDK transport to retain raw responses alongside decoding.
-// It leaves framing, initialization, cancellation and shutdown to the SDK.
+// It sees already-decoded messages and cannot enforce inbound byte limits.
+// Downstream command readers and HTTP/SSE transports must bound bytes first.
+// It leaves initialization, cancellation and shutdown to the underlying transport and SDK.
 type Transport struct{ Base mcp.Transport }
 
 // Connect opens the underlying transport and wraps its connection.

@@ -22,7 +22,9 @@ brew tap fschrhunt/tap https://github.com/fschrhunt/tap
 brew install fschrhunt/tap/tap
 ```
 
-Update with `brew upgrade fschrhunt/tap/tap`.
+Update with `brew upgrade fschrhunt/tap/tap`. The release formula generator accepts only
+`vX.Y.Z` tags and exactly one 64-digit hexadecimal checksum for each archive; generated
+release URLs, digests and versions use validated single-quoted Ruby literals.
 
 ## Install from Releases
 

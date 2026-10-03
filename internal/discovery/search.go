@@ -26,6 +26,11 @@ type Match struct {
 	Score float64
 }
 
+// Query and candidate limits bound ranking memory and repeated catalog scans.
+const MaxQueryBytes = 4096
+const MaxQueryTerms = 32
+const MaxRankTools = 65536
+
 var stops = map[string]bool{"a": true, "an": true, "the": true, "to": true, "of": true, "for": true, "in": true, "on": true, "with": true, "my": true, "me": true, "please": true, "can": true, "you": true, "i": true, "want": true, "would": true, "like": true, "and": true, "is": true}
 
 // scan calls word with each lowercase word of s in turn, splitting identifiers and Unicode
@@ -86,11 +91,13 @@ func term(w []byte) []byte {
 	return w
 }
 
-// terms removes query filler and conservatively normalizes English plurals.
+// terms removes filler, normalizes plurals and deduplicates at most 32 query terms.
 func terms(s string) []string {
 	out := []string{}
+	seen := map[string]bool{}
 	scan(s, func(w []byte) {
-		if w = term(w); w != nil {
+		if w = term(w); w != nil && !seen[string(w)] && len(out) < MaxQueryTerms {
+			seen[string(w)] = true
 			out = append(out, string(w))
 		}
 	})
@@ -178,24 +185,31 @@ func count(tools []Tool, q []string) []tally {
 }
 
 // Rank performs field-weighted BM25 with stable catalog-order ties. A query that is a tool's
-// name or id, word for word, returns the tools so named. Otherwise the tools that hold every
-// word of the query are returned, and when none does, the tools that hold any: unknown
-// vocabulary does not eliminate relevant tools, and zero overlap returns none.
+// name or id, word for word, returns the tools so named. Otherwise the tools that hold
+// all of the first 32 distinct normalized terms are returned, and when none does,
+// the tools that hold any: unknown vocabulary does not eliminate relevant tools,
+// and zero overlap returns none.
 //
 // Nothing is kept between queries: each one reads the catalog it is given, which costs less
 // than a millisecond for hundreds of tools and leaves nothing to build before the first.
+// Queries over 4096 bytes or catalogs over 65536 tools return no matches; gateways
+// must reject these inputs with a diagnostic before invoking Rank.
 func Rank(tools []Tool, query string) []Match {
+	if len(query) > MaxQueryBytes || len(tools) > MaxRankTools {
+		return nil
+	}
 	if asked := strings.Join(Tokens(query), " "); asked != "" {
 		named := []Match{}
 		for _, t := range tools {
 			_, name, _ := strings.Cut(t.ID, ".")
 			if strings.Join(Tokens(t.ID), " ") == asked {
-				named = append([]Match{{t, 2000}}, named...)
+				named = append(named, Match{t, 2000})
 			} else if name != "" && strings.Join(Tokens(name), " ") == asked {
 				named = append(named, Match{t, 1000})
 			}
 		}
 		if len(named) > 0 {
+			sort.SliceStable(named, func(i, j int) bool { return named[i].Score > named[j].Score })
 			return named
 		}
 	}
@@ -286,6 +300,11 @@ func Rank(tools []Tool, query string) []Match {
 
 // oneEdit recognizes one insertion, deletion or substitution without fuzzy substring matches.
 func oneEdit(a, b string) bool {
+	// Reject large length differences before allocating rune slices for server text.
+	na, nb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
+	if na-nb > 1 || nb-na > 1 {
+		return false
+	}
 	x, y := []rune(a), []rune(b)
 	if len(x) > len(y) {
 		x, y = y, x
