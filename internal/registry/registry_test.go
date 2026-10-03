@@ -488,11 +488,12 @@ func TestBoundedFanoutKeepsWarmCacheFast(t *testing.T) {
 		servers.Set(fmt.Sprintf("s%d", i), wire.Object{{Name: "url", Value: p.url}})
 	}
 	e := testEngine(t, servers)
-	if _, err := e.snapshot(); err != nil {
+	snapshot, err := e.snapshot()
+	if err != nil {
 		t.Fatal(err)
 	}
 	def := servers.Get("s0").(wire.Object)
-	fingerprint := definitionFingerprint(def)
+	fingerprint := snapshot.fingerprints["s0"]
 	e.mu.Lock()
 	e.catalogs["s0"] = &catalog{fingerprint: fingerprint, good: true, at: time.Now(), tools: []wire.Object{{{Name: "name", Value: "cached"}}}}
 	e.mu.Unlock()
