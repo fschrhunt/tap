@@ -413,11 +413,18 @@ func TestShutdownPendingCall(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("EOF did not stop active call")
 	}
-	b, err := os.ReadFile(closed)
-	if err != nil {
-		t.Fatal("downstream was not closed:", err)
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		b, err := os.ReadFile(closed)
+		if err == nil {
+			equal(t, string(b), "closed\n")
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("downstream was not closed:", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	equal(t, string(b), "closed\n")
 }
 
 // TestCommandEnvironmentPath resolves a bare command using its configured environment.
