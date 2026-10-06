@@ -193,4 +193,7 @@ rm ~/.local/bin/tap      # or ~/go/bin/tap
 Optionally remove `~/.tap` after backing up any server definitions you want to keep. This
 deletes saved sign-ins, tool lists, remote profiles, pairing credentials and the host identity.
 If you used `TAP_CONFIG`, check that location and its sidecar files too. Deleting local files
-does not revoke provider tokens or a device's access to a remote: sign out or revoke it first.
+does not revoke provider tokens or a device's access to a remote. To revoke access, revoke
+OAuth grants at the provider and run `tap remote revoke DEVICE_ID` on the remote host before
+deleting local files. `tap auth NAME --remove` only forgets tap's saved sign-in; it does not
+revoke tokens at the provider.
