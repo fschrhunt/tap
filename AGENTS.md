@@ -2,6 +2,9 @@
 
 ## Commands
 
+- `./x check` (the default) checks Go formatting, vet, build and race tests without rewriting sources.
+- `./x --help` lists targets; `./x test` and `./x build` forward Go arguments.
+
 - `go build -o tap ./cmd/tap` builds the binary (Go 1.26 or newer).
 - `go test ./...` runs the offline unit and black-box suites; TestMain builds tap and its fixture once.
 - `go test -race ./...` checks concurrent registry, config and remote behavior (also run in CI).

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `./x check` for shared local/CI formatting, vet, build and race tests, with
+  a concise PR template that records actual verification results.
+
 - Advertise configured integration names and explicit routing guidance in both MCP initialization
   instructions and `plugin_search`, including through remote relays without starting connectors.
   Bound escaped names and keep discovery usable when a remote overview is unavailable.
