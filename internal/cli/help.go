@@ -110,7 +110,8 @@ var topics = []topic{
 		about: "Shows each setting, its value and where the value comes from: its default, the\n" +
 			"config, or an environment variable, which wins over both. set keeps a value in the\n" +
 			"config; unset removes it. With --server, start and idleTimeoutMs are kept for one\n" +
-			"server and win over the general value. TAP_REFERENCES, TAP_DEADLINE_MS, TAP_IDLE_TTL_MS\n" +
+			"server and win over the general value; idleTimeoutMs is positive and stdio-only.\n" +
+			"TAP_REFERENCES, TAP_DEADLINE_MS, TAP_IDLE_TTL_MS\n" +
 			"and TAP_FAIL_TTL_MS win over references, deadlineMs, idleTimeoutMs and retryAfterMs.\n" +
 			"An agent's tap reads its settings when it starts.",
 		examples: []string{"tap config", "tap config set start search          # check tools again on every search",

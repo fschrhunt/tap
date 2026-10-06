@@ -93,6 +93,11 @@ func read(path string) (*store, error) {
 	if s.Servers == nil {
 		s.Servers = map[string]*grant{}
 	}
+	for _, g := range s.Servers {
+		if g == nil {
+			return nil, fmt.Errorf("%s is not a sign-in file tap wrote; remove it and run \"tap auth\" again", path)
+		}
+	}
 	return s, nil
 }
 

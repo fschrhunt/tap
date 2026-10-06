@@ -265,3 +265,14 @@ func TestSignInFileOthersCanReadIsRefused(t *testing.T) {
 		t.Fatalf("read = %v; want a refusal that says how to fix the file", err)
 	}
 }
+
+func TestFingerprintsRejectsNullGrant(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "servers.json")
+	path := Path(config)
+	if err := os.WriteFile(path, []byte(`{"version":1,"servers":{"broken":null}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Fingerprints(config); err == nil {
+		t.Fatal("Fingerprints accepted a null grant")
+	}
+}
