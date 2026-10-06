@@ -358,11 +358,16 @@ func TestStreamableHTTP(t *testing.T) {
 	equal(t, h.call("echo", map[string]any{"message": "over HTTP"})["content"], []any{map[string]any{"type": "text", "text": "over HTTP"}})
 }
 
-// TestEmptyServerCatalog preserves the original omission of servers with no tools.
+// TestEmptyServerCatalog keeps configured integrations visible even when they have no tools.
 func TestEmptyServerCatalog(t *testing.T) {
 	h := start(t, map[string]any{"fixture": definition("--empty")})
 	h.initialize()
-	equal(t, h.search(nil)["integrations"], []any{})
+	rows := h.search(nil)["integrations"].([]any)
+	equal(t, len(rows), 1)
+	row := rows[0].(map[string]any)
+	equal(t, row["server"], "fixture")
+	equal(t, row["tools"], float64(0))
+	equal(t, row["availability"], "reachable")
 }
 
 // TestConfigOrder protects server insertion order when scores are tied.

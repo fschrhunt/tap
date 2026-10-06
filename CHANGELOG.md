@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Advertise configured integration names and explicit routing guidance in both MCP initialization
+  instructions and `plugin_search`, including through remote relays without starting connectors.
+  Bound escaped names and keep discovery usable when a remote overview is unavailable.
+- Keep integrations with zero tools visible in server listings instead of silently omitting them.
 - Reject slash-containing downstream tool names so path globs cannot bypass deny policy.
 - Bound downstream HTTP JSON/error bodies (including errors claiming SSE) and SSE events
   to 16 MiB; gate stdio raw lines (including delimiters) at 16 MiB before JSON validation or SDK decoding. Reject JSON
