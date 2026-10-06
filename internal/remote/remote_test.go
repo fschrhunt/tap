@@ -20,9 +20,100 @@ import (
 	"github.com/fschrhunt/tap/internal/auth"
 	"github.com/fschrhunt/tap/internal/config"
 	"github.com/fschrhunt/tap/internal/registry"
+	"github.com/fschrhunt/tap/internal/server"
 	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// TestRelayIntegrationRouting checks execution devices advertise only remote names,
+// without initializing remote MCP or contacting a downstream connector.
+func TestRelayIntegrationRouting(t *testing.T) {
+	var connections atomic.Int32
+	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connections.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer downstream.Close()
+	path := filepath.Join(t.TempDir(), "servers.json")
+	if _, err := config.Put(path, "cloudflare", wire.Object{{Name: "url", Value: downstream.URL}, {Name: "headers", Value: wire.Object{{Name: "Authorization", Value: "private-connector-secret"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	host, manager := testHost(t, path)
+	client := pairedTestClient(t, host, manager, "execution")
+	s, err := server.New(client, "test", config.Values{SearchLimit: 8, SearchMaxBytes: 32768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil))
+	defer relay.Close()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil).Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: relay.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	tools, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var description string
+	for _, tool := range tools.Tools {
+		if tool.Name == "plugin_search" {
+			description = tool.Description
+		}
+	}
+	for _, surface := range []string{session.InitializeResult().Instructions, description} {
+		if !strings.Contains(surface, "cloudflare") || strings.Contains(surface, "private-connector-secret") || strings.Contains(surface, downstream.URL) {
+			t.Fatalf("incorrect remote routing surface: %s", surface)
+		}
+	}
+	client.mu.Lock()
+	connected := client.session != nil
+	client.mu.Unlock()
+	if connected || connections.Load() != 0 {
+		t.Fatal("overview initialized MCP or contacted a downstream connector")
+	}
+}
+
+// TestOverviewRequiresDevice protects integration names behind paired-device authentication.
+func TestOverviewRequiresDevice(t *testing.T) {
+	host, _ := testHost(t, filepath.Join(t.TempDir(), "servers.json"))
+	response, err := host.Client().Get(host.URL + "/overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated overview returned %d", response.StatusCode)
+	}
+}
+
+// TestOverviewFailureDoesNotPreventServing covers old, broken and oversized host responses.
+func TestOverviewFailureDoesNotPreventServing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"older host", http.StatusNotFound, "not found"},
+		{"invalid JSON", http.StatusOK, `{broken`},
+		{"oversized", http.StatusOK, `{"names":["` + strings.Repeat("x", 8192) + `"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer host.Close()
+			client := &Client{ctx: context.Background(), http: host.Client(), cfg: config.Remote{URL: host.URL + "/mcp"}}
+			if _, err := client.Overview(); err == nil {
+				t.Fatal("invalid overview accepted")
+			}
+			if _, err := server.New(client, "test", config.Values{SearchLimit: 8, SearchMaxBytes: 32768}); err != nil {
+				t.Fatalf("overview failure prevented serving: %v", err)
+			}
+		})
+	}
+}
 
 // testHost starts a paired HTTPS registry with credentials scoped to the requested role.
 func testHandler(t *testing.T, path string) (http.Handler, *deviceManager, func()) {

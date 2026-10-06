@@ -73,6 +73,20 @@ func handler(path, version string, devices *deviceManager) (http.Handler, func()
 	go e.Warm()
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{MaxRequestBodyBytes: bodyLimit, SessionTimeout: 30 * time.Minute, PropagateRequestCancellation: true})
 	mux := http.NewServeMux()
+	// Execution devices may read names, but never connector definitions or credentials.
+	mux.HandleFunc("/overview", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		overview, err := e.Overview()
+		if err != nil {
+			http.Error(w, "cannot read integration names", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(overview)
+	})
 	// Serialize admissions so simultaneous initializations cannot exceed the session cap.
 	const maxSessions = 64
 	var admission sync.Mutex
@@ -664,7 +678,7 @@ func (c *Client) open(pending *initialization) {
 	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	defer cancel()
 	client := mcp.NewClient(&mcp.Implementation{Name: "tap", Version: c.version}, nil)
-	// The remote's two definitions never change; discovery happens through calls,
+	// The remote's two tool names never change; discovery happens through calls,
 	// so a relay needs no extra persistent notification stream.
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, HTTPClient: c.http, MaxRetries: -1, MaxEventSize: wire.MaxMessageBytes, DisableStandaloneSSE: true}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"})
 	if err != nil {
@@ -760,6 +774,31 @@ func (c *Client) catalog(ctx context.Context, args any) (wire.Object, error) {
 		return nil, fmt.Errorf("invalid remote catalog")
 	}
 	return obj, nil
+}
+
+// Overview fetches only configured remote names with a bounded startup deadline. It does
+// not initialize MCP or start downstream servers; older/offline hosts leave discovery usable.
+func (c *Client) Overview() (registry.IntegrationOverview, error) {
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.cfg.URL, "/mcp")+"/overview", nil)
+	if err != nil {
+		return registry.IntegrationOverview{}, fmt.Errorf("invalid remote overview address")
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return registry.IntegrationOverview{}, fmt.Errorf("cannot read remote integration names")
+	}
+	defer response.Body.Close()
+	var overview registry.IntegrationOverview
+	if response.StatusCode != http.StatusOK {
+		return overview, fmt.Errorf("remote integration names are unavailable")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8193))
+	if err != nil || len(body) > 8192 || json.Unmarshal(body, &overview) != nil {
+		return registry.IntegrationOverview{}, fmt.Errorf("invalid remote integration names")
+	}
+	return overview, nil
 }
 
 // Listing returns the remote registry catalog without reading local servers.

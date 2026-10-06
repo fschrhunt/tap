@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -21,29 +22,35 @@ type SearchOptions struct {
 	Refresh               bool
 }
 
-// Overview lists a bounded set of integration names without starting any server.
-func (e *Engine) Overview() string {
+// IntegrationOverview identifies configured integrations, not their availability or capabilities.
+// Names is bounded; More counts omitted names. It contains no connection definitions.
+type IntegrationOverview struct {
+	Names []string `json:"names"`
+	More  int      `json:"more"`
+}
+
+// Overview reads integration names without starting downstream servers or reading their catalogs.
+func (e *Engine) Overview() (IntegrationOverview, error) {
 	servers, err := config.Load(e.Path)
 	if err != nil {
-		return ""
+		return IntegrationOverview{}, err
 	}
 	names := []string{}
-	size := 0
+	size := 2
 	for _, s := range servers {
-		if len(names) >= 16 || size+len(s.Name) > 1024 {
+		// Bound the encoded text too: escaping a name can increase its size.
+		encoded, _ := json.Marshal(s.Name)
+		cost := len(encoded)
+		if len(names) > 0 {
+			cost++
+		}
+		if len(names) >= 16 || size+cost > 1024 {
 			break
 		}
 		names = append(names, s.Name)
-		size += len(s.Name)
+		size += cost
 	}
-	if len(names) == 0 {
-		return ""
-	}
-	b, _ := wire.JSON(names, false)
-	if more := len(servers) - len(names); more > 0 {
-		return fmt.Sprintf(" Servers: %s and %d more; plugin_search with no arguments lists them.", b, more)
-	}
-	return fmt.Sprintf(" Servers: %s.", b)
+	return IntegrationOverview{Names: names, More: len(servers) - len(names)}, nil
 }
 
 // Search keeps the shell's full-schema search and original numeric limit semantics.

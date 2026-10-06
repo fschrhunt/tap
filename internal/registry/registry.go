@@ -434,16 +434,14 @@ func (e *Engine) Refresh(ctx context.Context, server string, quiet bool) (wire.O
 	return e.listingRows(rows, err)
 }
 
-// listingRows distinguishes cached catalogs from live availability checks.
+// listingRows retains all configured integrations, including empty catalogs, and
+// distinguishes cached catalogs from live availability checks.
 func (e *Engine) listingRows(rows []serverTools, err error) (wire.Object, error) {
 	if err != nil {
 		return nil, err
 	}
 	integrations := []any{}
 	for _, r := range rows {
-		if len(r.tools) == 0 && r.err == "" {
-			continue
-		}
 		row := wire.Object{{Name: "server", Value: r.name}, {Name: "tools", Value: len(r.tools)}}
 		if r.stale {
 			row.Set("stale", true)

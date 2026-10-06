@@ -1,7 +1,29 @@
 # How it works
 
-tap exposes two MCP tools, with no model or embedding service inside the gateway. Local
-initialization includes a bounded integration-name overview without starting downstream servers.
+tap exposes two MCP tools, with no model or embedding service inside the gateway. Both MCP
+initialization instructions and the `plugin_search` description identify tap as the gateway,
+list configured integration names, and tell the agent to search here when a request names one.
+This makes the route visible even when a harness omits MCP initialization instructions.
+
+```text
+User: "Check Cloudflare for failed builds"
+  → Agent sees that tap contains "cloudflare"
+  → plugin_search({server: "cloudflare", query: "failed builds"})
+  → Inspect the discovered tool's schema
+  → plugin_call({tool: "cloudflare.<discovered tool>", arguments: {...}})
+```
+
+Names are routing data, not capability descriptions or availability promises. The startup
+snapshot includes at most 16 names / 1024 bytes of JSON-encoded names; omitted names are
+signposted with `plugin_search({})`. No downstream server is started to obtain this overview.
+Start a new local tap process to refresh the advertised snapshot after config changes;
+discovery itself still reads current configuration.
+
+A remote relay reads names from its host's authenticated `/overview` endpoint, never from
+local connectors. This startup request has a five-second deadline and does not initialize a
+remote MCP session. An offline or older host leaves the two tools usable with generic routing
+guidance; `plugin_search({})` can list integrations once the host is reachable. Names on a
+direct hosted MCP connection are a host-startup snapshot; restart the host to refresh them.
 
 ## Discover, browse, inspect
 
@@ -125,7 +147,7 @@ preserved, not reclassified. Stdio preserves raw numeric spelling; HTTP retains 
 ## Opt-in result references
 
 References are off unless the `references` [setting](settings.md) is on. Off, `plugin_call` offers
-only `tool` and `arguments`, which keeps the two definitions an agent loads near 300 tokens, and
+only `tool` and `arguments`, keeping the call contract small alongside the bounded integration names, and
 a call that uses a reference field is refused with `reference_unavailable` before anything is
 sent. On, `plugin_call` also describes the fields below.
 
@@ -171,7 +193,8 @@ references add inspection turns and do not benefit every workload.
 ## Remote mode
 
 A [remote](remote.md) shares one registry, index and downstream sessions across agents/machines.
-Harnesses still launch tap over stdio and see two tools. The local relay connects lazily; connector
+Harnesses still launch tap over stdio and see two tools. After the bounded name-only startup
+request, the local relay establishes its MCP session lazily; connector
 credentials stay on the host. Additions need no harness restart. Discovery, inspection, refresh,
 validation and result operations use the remote backend, not a merged local/remote namespace.
 Local definitions remain available after remote off or CLI `--local`. Remote failures never silently

@@ -57,7 +57,11 @@ the same profile name to replace one; the saved name is retained.
 
 Harness configurations do not change: `claude mcp add --scope user tap -- tap`,
 Codex's `command = "tap"`, or OpenCode's local `command: ["tap"]` still work.
-The connection is opened only when needed, not during session initialization.
+At startup the relay reads configured integration names over authenticated HTTP,
+with a five-second deadline, so instructions and the search description identify
+the services available through tap. No downstream connector starts for this request.
+The remote MCP session is opened only when needed. Offline or older hosts leave
+generic discovery usable; restart the relay to refresh its advertised name snapshot.
 
 ## Add once, discover everywhere
 
@@ -72,6 +76,8 @@ tap remove issues
 The next search from an already-running agent sees additions. A changed or removed
 definition invalidates the remote's old connector session. No restart, schema
 push into model context or dotfile synchronization is needed.
+The names advertised in the search description are a startup snapshot; restart the
+relay to advertise newly added names, or use `plugin_search({})` to list them live.
 
 All command paths, filesystem access, working directories and environment
 references resolve **on the remote**, not on the client. For example,

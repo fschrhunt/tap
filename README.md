@@ -12,7 +12,8 @@
 
 tap is one MCP server that stands in for all of yours. Your agent loads two tools,
 `plugin_search` and `plugin_call`, instead of every tool from every server, and finds the rest
-when it needs them.
+when it needs them. Initialization instructions and the search tool description show which
+integrations tap contains, so the agent knows to use tap when you name one.
 
 Search or browse capabilities, inspect complete contracts, and call with validated arguments.
 Saved tools are searched without starting their servers, even across sessions; a server starts
