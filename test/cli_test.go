@@ -247,7 +247,7 @@ func TestMisuseSaysWhatToTypeInstead(t *testing.T) {
 		{[]string{"list", "--jsno"}, "list has no flag --jsno. Did you mean --json?"},
 		{[]string{"add", "docs", "https://example.invalid/mcp", "--bearer-token-env"}, "--bearer-token-env needs a value"},
 		{[]string{"add", "docs", "example.invalid"}, `"example.invalid" is not an http or https address`},
-		{[]string{"search"}, "search needs something to look for, or --server to list one server's tools\n\nUsage: tap search QUERY... [--server NAME] [--limit N] [--json]\n       tap search --server NAME\nRun \"tap search --help\" for examples."},
+		{[]string{"search"}, "search needs something to look for, or --server to list one server's tools\n\nUsage: tap search QUERY... [--server NAME] [--limit N] [--json]\n       tap search --server NAME\nRun \"tap help search\" for examples."},
 		{[]string{"call", "echo"}, `"echo" is not a tool id`},
 	} {
 		r := b.run(c.args...)
@@ -260,13 +260,16 @@ func TestMisuseSaysWhatToTypeInstead(t *testing.T) {
 	}
 }
 
-// TestHelpFlagShowsACommandsHelpWithoutRunningIt pins that -h and --help anywhere mean help.
+// TestHelpFlagShowsACommandsHelpWithoutRunningIt pins that help aliases before -- match
+// the help subcommand without running the requested command.
 func TestHelpFlagShowsACommandsHelpWithoutRunningIt(t *testing.T) {
 	b := sandbox(t)
-	for _, args := range [][]string{{"add", "docs", "https://example.invalid/mcp", "--help"}, {"add", "-h"}, {"help", "add"}} {
+	help := b.run("help", "add")
+	equal(t, help.status, 0)
+	contains(t, help.stdout, "tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes")
+	for _, args := range [][]string{{"add", "docs", "https://example.invalid/mcp", "--help"}, {"add", "-h"}} {
 		r := b.run(args...)
-		equal(t, r.status, 0)
-		contains(t, r.stdout, "tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes")
+		equal(t, r, help)
 	}
 	if _, err := os.Stat(b.config); err == nil {
 		t.Fatal("asking for help added a server")

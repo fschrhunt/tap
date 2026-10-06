@@ -16,7 +16,13 @@ On the machine hosting the connectors, configure them normally:
 ```sh
 tap add files -- npx -y @modelcontextprotocol/server-filesystem /srv/notes
 tap add docs https://docs.example.com/mcp --bearer-token-env DOCS_TOKEN
+tap list
+tap remote serve
 ```
+
+Replace the example endpoint and path with your own. Required environment variables, such as
+`DOCS_TOKEN`, must be available to the process running `tap remote serve`. Keep that process
+running for clients to use it.
 
 By default, `tap remote serve` starts paired-device HTTPS on port `8443`, bound
 to all interfaces. It creates a persistent self-signed identity and prints its
@@ -25,7 +31,16 @@ The codes expire after 15 minutes. Pairing codes are credentials: show them only
 to people you intend to authorize. mDNS advertises the service when available,
 but discovery does not authenticate or trust the host.
 
-On each client, run `tap remote pair NAME https://HOST:8443`. The client shows
+On each client, in an interactive terminal:
+
+```sh
+tap remote pair home https://HOST:8443
+tap remote status --check
+tap list
+```
+
+Replace `HOST` with a reachable hostname or IP address. Allow inbound TCP port 8443 on the host
+if needed; pairing does not create a network route or configure your firewall. The client shows
 the certificate fingerprint it observed; compare it with the fingerprint on the
 serving machine before continuing, then enter the one-time execution code. Pairing
 uses TLS pinned to that exact certificate, and the device token is stored in an
@@ -47,10 +62,11 @@ registry.
 
 ## Save and select remotes
 
-Pair each client with `tap remote pair NAME https://HOST:8443`, then select it with
-`tap remote use NAME`. Use `tap remote list` to see saved devices and
-`tap remote remove NAME` to remove a local profile. `tap remote off` returns to the
-local registry without deleting saved profiles.
+`tap remote pair NAME https://HOST:8443` saves **and selects** the profile. Switch back to a
+saved profile with `tap remote use NAME`. Use `tap remote list` to see saved profiles and
+`tap remote remove NAME` to remove a local profile. Removing a profile does not revoke the
+device on the host; use `tap remote revoke DEVICE_ID` there to revoke access.
+`tap remote off` returns to the local registry without deleting saved profiles.
 
 Existing token based remote profiles cannot connect to this server. Pair again with
 the same profile name to replace one; the saved name is retained.
@@ -65,7 +81,10 @@ generic discovery usable; restart the relay to refresh its advertised name snaps
 
 ## Add once, discover everywhere
 
-With a remote selected, the ordinary CLI commands use it:
+With a remote selected, the ordinary CLI commands use it. Adding/removing servers and
+managing sign-ins require an admin-paired device. For example, pair with
+`tap remote pair home https://HOST:8443 --role admin` and use the host's admin code.
+Execution-paired devices can list, search, inspect and call tools, but cannot make these edits:
 
 ```sh
 tap add issues https://issues.example.com/mcp --bearer-token-env ISSUES_TOKEN
@@ -84,7 +103,7 @@ references resolve **on the remote**, not on the client. For example,
 `--bearer-token-env ISSUES_TOKEN` reads the remote process's environment.
 
 A server waiting for a sign-in reports `needs you to sign in: run "tap auth NAME"`.
-Run that command from the client: tap opens the browser locally, relays the callback
+Run that command from an admin-paired client: tap opens the browser locally, relays the callback
 to the remote, and keeps the resulting grant on the serving machine. `tap auth NAME
 --local` signs in to the local registry instead. Creating or removing remote grants
 uses the remote administration credential.
@@ -100,7 +119,7 @@ silent switch to a similarly named local tool.
 
 ## Credentials and trust
 
-Execution pairing grants tool access. Use `tap remote pair --role admin` only on
+Execution pairing grants tool access. Use `tap remote pair NAME https://HOST:8443 --role admin` only on
 devices that need to add or remove shared servers or manage sign-in. Ordinary agent
 devices should use the execution role.
 
@@ -129,7 +148,7 @@ sampling, elicitation, progress forwarding or asynchronous MCP continuation
 workflows. Upstream tool execution is not automatically retried after a failure,
 since an operation may have taken effect before the connection was lost.
 
-Remote CLI searches use the MCP limit range (`1`–`25`), unlike the legacy local
+Remote CLI searches use the MCP limit range (`1`–`25`), unlike the local
 CLI's unconstrained `--limit` behavior. Connection setup and administrative edits
 have ten-second deadlines; tool execution remains governed by caller cancellation.
 

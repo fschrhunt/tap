@@ -21,6 +21,10 @@ own server config. `TestMain` builds tap and the Go MCP fixture once. The tests 
 and MCP over stdio, with a local Streamable HTTP peer too. Add a CHANGELOG entry for
 user-visible changes.
 
+Set `TAP_CONFIG` to a temporary file when trying config commands manually; never test against
+your personal server registry. `TAP_TEST_RACE=1 ./x check` race-builds the black-box subprocesses too.
+For CLI text changes, keep `internal/cli/help.go`, the docs and `test/testdata/help.txt` consistent.
+
 Report issues with `tap version` and `tap list` output, what you expected, and
 what happened. Remove sensitive values before sharing output.
 

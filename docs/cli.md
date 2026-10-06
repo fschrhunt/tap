@@ -36,10 +36,18 @@ short introduction instead of waiting for an agent that is not there.
 
 ## Help
 
-`tap --help` lists every command, the flags they share and the environment tap reads.
-`tap COMMAND --help`, `tap COMMAND -h` and `tap help COMMAND` show one command's usage, examples
-and flags. `-h` and `--help` mean help wherever they stand, so adding one to a command you are
-unsure of never runs it.
+Use `tap help` for every command, shared flags and environment variables. Use
+`tap help COMMAND` for one command's usage, examples and flags:
+
+```sh
+tap help
+tap help add
+tap help remote
+```
+
+`tap --help`, `tap COMMAND --help` and `tap COMMAND -h` are supported aliases.
+Help flags before `--` show help without running the command. After `--`, they belong to
+the downstream command: `tap add files -- node server.mjs --help` adds that command as written.
 
 ## Flags
 
@@ -55,18 +63,18 @@ Everything after `--` is taken as written: for `tap add`, it is the server's com
 | `--local` | `import`, `add`, `remove`, `list`, `refresh`, `search`, `inspect`, `call`, `auth` | Use this machine's servers while a remote is selected |
 | `--cached` | `list` | Print the tool lists tap has saved, without asking the servers |
 | `--server NAME` | `search`, `config` | Look only in this server; with no query, list its tools. For `config`, the server whose own setting to read or change |
-| `--limit N` | `search` | How many tools to print: a whole number of at least 1 (default: the `searchLimit` setting, 8) |
+| `--limit N` | `search` | How many tools to print (default: `searchLimit`, 8). Local: at least 1; remote: 1–25 |
 | `--offset N` | `search` | Skip this many matches, to continue a longer list |
 | `--refresh` | `search` | Ask the servers for their tools first |
-| `--detail auto\|full\|summary` | `search` | With `--json`: whole schemas, or summaries (default `full`) |
-| `--max-bytes N` | `search` | With `--json`: the most the answer may hold |
+| `--detail auto\|full\|summary` | `search` | Schema detail, visible with `--json`: whole schemas or summaries (default `full`) |
+| `--max-bytes N` | `search` | Discovery response budget, 1024–16777216 bytes (default 16777216); applies before text or JSON rendering |
 | `--args JSON` | `call` | The arguments as a JSON object; `-` reads standard input |
 | `-n`, `--dry-run` | `import` | Show what would be added and add nothing |
 | `-f`, `--force` | `import` | Replace servers tap already has under the same name |
 
 With a remote selected, registry commands including `auth` use it; `--local` uses the
 saved local registry. `config` always manages this local tap installation. `import` reads
-this machine's agent files and remains local-only. See
+this machine's agent files and requires `--local` when a remote is selected. See
 [Remote](remote.md) for listener, TLS and authentication options.
 `path` still prints the local config file that stores the remote selection.
 
@@ -91,8 +99,8 @@ A command called wrongly prints the mistake, the command's usage and where its e
 $ tap list --jsno
 tap: list has no flag --jsno. Did you mean --json?
 
-Usage: tap list [--json]
-Run "tap list --help" for examples.
+Usage: tap list [--cached] [--json]
+Run "tap help list" for examples.
 ```
 
 ## List
@@ -116,8 +124,10 @@ it asks them all.
 
 ## Search
 
+The following output is illustrative, for a server named `files` with an `echo` tool:
+
 ```sh
-tap search echo
+tap search echo --server files
 ```
 
 ```text
@@ -133,7 +143,7 @@ every retained query term are printed, best first, and when none holds them all,
 `--json` shows the input schema too, as the agent gets it:
 
 ```sh
-tap search echo --json
+tap search echo --server files --json
 ```
 
 ```json
@@ -150,8 +160,7 @@ tap search echo --json
         "required": ["message"],
         "$schema": "https://json-schema.org/draft/2020-12/schema"
       },
-      "schemaLoaded": true,
-      "stale": false
+      "schemaLoaded": true
     }
   ],
   "unavailable": [],
@@ -171,13 +180,26 @@ JSON, asking only the server that has it.
 
 ## Call
 
-Give arguments as `key=value` strings, as JSON with `--args`, or both (`key=value` wins):
+Use the ID and schema returned by `tap search` or `tap inspect`. The tool names below are
+examples, not built-in tap tools.
+
+Give arguments as `key=value` strings, as JSON with `--args`, or both (`key=value` wins).
+Use JSON for numbers, booleans, arrays and objects; `key=value` always supplies a string:
 
 ```sh
 tap call files.echo message=hi
 tap call issues.create --args '{"title": "Login fails", "labels": ["bug"]}'
 tap call db.query --args - < query.json
 ```
+
+tap does not expand `~` in tool arguments. For a local path, let your shell expand it:
+
+```sh
+tap call files.read_text_file path="$HOME/notes/todo.md"
+```
+
+With a remote selected, paths must exist on the remote; your shell's `$HOME` still refers to
+the client. Use the remote path explicitly instead.
 
 The tool's text is printed; `--json` prints the downstream result (HTTP uses the SDK's supported
 fields; stdio retains raw response fields). When the tool reports an error, its content is still

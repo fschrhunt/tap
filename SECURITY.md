@@ -47,16 +47,20 @@ not on the agent's machine. Only configure commands and servers you trust.
 
 The execution token grants access to tools allowed by the remote's policy. An admin
 token additionally allows adding or replacing commands: treat it as remote code
-execution authority. Use a separate admin token when clients only need tools.
+execution authority. Pair ordinary agent devices with the execution role; grant the admin
+role only to devices that need to edit servers or manage sign-ins.
 This is a single-owner service, not a multi-tenant sandbox: clients share upstream
 credentials and downstream sessions. Result references are bound to MCP session identity, but
 this does not create a multi-tenant sandbox. Do not share a remote between mutually untrusted users.
 
-Use HTTPS over untrusted networks, either tap's native TLS with your certificates
-or a TLS reverse proxy. Plain HTTP exposes tokens, arguments and results to anyone
-who can observe the connection. An explicit insecure option is intended for
-trusted networks or a proxy's private backend, not public Internet exposure.
-No VPN or Tailscale installation is required.
+`tap remote serve` uses paired-device HTTPS, with a persistent self-signed identity or
+your own certificate supplied through `--tls-cert` and `--tls-key`. Before pairing, compare
+the client's displayed SHA-256 fingerprint with the host's fingerprint through a trusted
+channel. Pairing codes are single-use credentials and expire after 15 minutes. Device tokens
+stay in owner-only sidecars; do not copy the host's private identity or device registry to clients.
+Legacy shared-token and insecure HTTP serving are no longer supported. Revoke a lost or
+untrusted device on the host with `tap remote revoke DEVICE_ID`; deleting its local profile
+does not revoke access. No VPN or Tailscale installation is required.
 
 Tap's two-tool surface cannot make a harness's approval system distinguish each
 downstream tool. Search annotations are advisory, not authorization. Broadly
