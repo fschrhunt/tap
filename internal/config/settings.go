@@ -156,6 +156,16 @@ func Set(path, server, name string, value any) error {
 			if !ok {
 				return fmt.Errorf("there is no server named %q", server)
 			}
+			if name == "idleTimeoutMs" {
+				if value != nil {
+					n, ok := value.(float64)
+					typ, _ := def.Get("type").(string)
+					stdio := typ == "stdio" || (typ == "" && def.Get("url") == nil)
+					if !ok || n < 1 || n > 86400000 || n != float64(int(n)) || !stdio {
+						return fmt.Errorf("idleTimeoutMs must be an integer 1..86400000 for a stdio server")
+					}
+				}
+			}
 			holder = def
 		}
 		if value == nil {
@@ -192,7 +202,8 @@ func checkSettings(root wire.Object) error {
 		}
 	}
 	for _, f := range root.Get("servers").(wire.Object) {
-		if def := f.Value.(wire.Object); def.Has("start") {
+		def := f.Value.(wire.Object)
+		if def.Has("start") {
 			if err := checkSetting("start", def.Get("start")); err != nil {
 				return fmt.Errorf("server %s: %w", f.Name, err)
 			}

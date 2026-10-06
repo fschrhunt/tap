@@ -304,6 +304,13 @@ func (s *shell) config(args []string) (int, error) {
 	// value is what a setting stands at, for one server when one is named.
 	value := func(name string) (string, error) {
 		if *only != "" {
+			servers, err := config.Load(s.engine.Path)
+			if err != nil {
+				return "", err
+			}
+			if !servers.Has(*only) {
+				return "", fmt.Errorf("there is no server named %q", *only)
+			}
 			owned, err := config.Owned(s.engine.Path)
 			if err != nil {
 				return "", err
@@ -388,6 +395,9 @@ func (s *shell) config(args []string) (int, error) {
 		return 0, nil
 	}
 	verb := args[0]
+	if verb != "set" && verb != "unset" {
+		return 2, wrong("config", "config needs set or unset, not %q", verb)
+	}
 	if (verb == "set" && len(args) != 3) || (verb == "unset" && len(args) != 2) {
 		return 2, wrong("config", "%s takes a setting's name%s", verb, map[bool]string{true: " and its value", false: ""}[verb == "set"])
 	}
@@ -645,7 +655,7 @@ func (s *shell) remove(args []string) (int, error) {
 		return 1, fmt.Errorf("there is no server named \"%s\". Run \"tap list\" to see the ones there are", args[0])
 	}
 	target := ""
-	if cfg, _ := config.LoadRemote(s.engine.Path); cfg != nil {
+	if _, relayed := backend.(*remote.Client); relayed {
 		target = " on " + selectedTarget(s.engine.Path)
 	}
 	print(s.out, "removed "+args[0]+target, false)
@@ -1051,6 +1061,11 @@ func hasTap(c connectable, home, cwd string) (bool, error) {
 			return false, err
 		}
 		if found.Has("tap") {
+			for _, skipped := range found.Skipped {
+				if skipped.Name == "tap" && strings.Contains(skipped.Why, "turned off") {
+					return false, fmt.Errorf("tap is turned off in %s; enable it there before connecting", path)
+				}
+			}
 			return true, nil
 		}
 	}

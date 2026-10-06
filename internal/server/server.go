@@ -52,7 +52,7 @@ const callWithReferencesDefinition = `{"name":"plugin_call","title":"Call or ins
 "offset":{"type":"integer","minimum":0,"maximum":1000000,"description":"Array/object page offset. Default 0."},
 "limit":{"type":"integer","minimum":1,"maximum":1000,"description":"Array/object page length. Default 100."},
 "maxBytes":{"type":"integer","minimum":1024,"maximum":16777216,"description":"Inspection byte budget. Default 32768."}
-}}}`
+},"additionalProperties":false}}`
 
 // Backend is the shared contract for local engines and remote relays.
 type Backend interface {
@@ -324,6 +324,21 @@ func kind(v any, present bool) string {
 // validate checks operation-specific fields and bounds before registry dispatch.
 func validate(name string, a wire.Object) string {
 	issues := []string{}
+	allowed := map[string]bool{}
+	if name == "plugin_search" {
+		for _, key := range []string{"query", "server", "ids", "detail", "limit", "offset", "maxBytes", "refresh"} {
+			allowed[key] = true
+		}
+	} else {
+		for _, key := range []string{"operation", "tool", "arguments", "resultMode", "argumentRefs", "reference", "pointer", "offset", "limit", "maxBytes"} {
+			allowed[key] = true
+		}
+	}
+	for _, field := range a {
+		if !allowed[field.Name] {
+			issues = append(issues, field.Name+": unknown field")
+		}
+	}
 	check := func(key, expected string, required bool) {
 		if !required && !a.Has(key) {
 			return

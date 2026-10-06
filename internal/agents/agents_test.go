@@ -70,3 +70,39 @@ func TestReadSkipsWhatTapCannotTakeOver(t *testing.T) {
 		}
 	}
 }
+
+func TestReadServerNamedServersAndOpenCodeNestedServers(t *testing.T) {
+	got, skipped := read(t, "mcp.json", `{"mcpServers":{"servers":{"command":"svc"},"files":{"command":"files"}}}`)
+	if got != `{"servers":{"type":"stdio","command":["svc"]},"files":{"type":"stdio","command":["files"]}}` || len(skipped) != 0 {
+		t.Fatalf("direct table = %s, skipped %v", got, skipped)
+	}
+	got, skipped = read(t, "opencode.json", `{"mcp":{"servers":{"browser":{"type":"local","command":["npx","browser"]}}}}`)
+	if got != `{"browser":{"type":"stdio","command":["npx","browser"]}}` || len(skipped) != 0 {
+		t.Fatalf("nested table = %s, skipped %v", got, skipped)
+	}
+}
+
+func TestPlacesHonorsAgentConfigEnvironmentOverrides(t *testing.T) {
+	home, cwd := "/home/test", "/work"
+	t.Setenv("CLAUDE_CONFIG_DIR", "/custom/claude")
+	t.Setenv("CODEX_HOME", "/custom/codex")
+	t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
+	got := Places(home, cwd)
+	want := map[string]string{
+		"claude":   filepath.Join("/custom/claude", ".claude.json"),
+		"codex":    filepath.Join("/custom/codex", "config.toml"),
+		"opencode": filepath.Join("/custom/xdg", "opencode", "opencode.jsonc"),
+	}
+	for id, path := range want {
+		found := false
+		for _, place := range got {
+			if place.ID == id && place.Path == path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Places missing %s config %s: %#v", id, path, got)
+		}
+	}
+}

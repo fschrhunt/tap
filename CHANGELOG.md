@@ -9,6 +9,13 @@
   instructions and `plugin_search`, including through remote relays without starting connectors.
   Bound escaped names and keep discovery usable when a remote overview is unavailable.
 - Keep integrations with zero tools visible in server listings instead of silently omitting them.
+- Reject unknown `config` verbs instead of treating them as `unset`; reject per-server idle
+  timeout overrides unless they are positive and belong to a stdio server. Report missing
+  servers when reading a per-server setting, disabled tap entries when connecting, and the
+  actual registry edited by `--local`.
+- Import agent configs from their configured home directories and distinguish OpenCode's
+  nested server table from a server actually named `servers`. Reject unknown top-level MCP
+  tool arguments so misspellings cannot silently turn into empty calls.
 - Reject slash-containing downstream tool names so path globs cannot bypass deny policy.
 - Bound downstream HTTP JSON/error bodies (including errors claiming SSE) and SSE events
   to 16 MiB; gate stdio raw lines (including delimiters) at 16 MiB before JSON validation or SDK decoding. Reject JSON

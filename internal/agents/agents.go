@@ -57,12 +57,24 @@ type Place struct {
 
 // Places lists the files tap knows to look in, for a home directory and a working directory.
 func Places(home, cwd string) []Place {
+	claudeHome := home
+	if value := os.Getenv("CLAUDE_CONFIG_DIR"); value != "" {
+		claudeHome = value
+	}
+	codexHome := filepath.Join(home, ".codex")
+	if value := os.Getenv("CODEX_HOME"); value != "" {
+		codexHome = value
+	}
+	openCodeHome := filepath.Join(home, ".config")
+	if value := os.Getenv("XDG_CONFIG_HOME"); value != "" {
+		openCodeHome = value
+	}
 	return []Place{
-		{"claude", "Claude Code", filepath.Join(home, ".claude.json")},
+		{"claude", "Claude Code", filepath.Join(claudeHome, ".claude.json")},
 		{"claude", "Claude Code", filepath.Join(cwd, ".mcp.json")},
-		{"codex", "Codex", filepath.Join(home, ".codex", "config.toml")},
-		{"opencode", "OpenCode", filepath.Join(home, ".config", "opencode", "opencode.jsonc")},
-		{"opencode", "OpenCode", filepath.Join(home, ".config", "opencode", "opencode.json")},
+		{"codex", "Codex", filepath.Join(codexHome, "config.toml")},
+		{"opencode", "OpenCode", filepath.Join(openCodeHome, "opencode", "opencode.jsonc")},
+		{"opencode", "OpenCode", filepath.Join(openCodeHome, "opencode", "opencode.json")},
 		{"opencode", "OpenCode", filepath.Join(cwd, "opencode.jsonc")},
 		{"opencode", "OpenCode", filepath.Join(cwd, "opencode.json")},
 		{"cursor", "Cursor", filepath.Join(home, ".cursor", "mcp.json")},
@@ -87,28 +99,45 @@ func Read(place Place, cwd string) (*Config, error) {
 	}
 	root, _ := v.(wire.Object)
 	// Each agent names its table differently; a file is read under every name it has.
-	for _, table := range []any{root.Get("mcpServers"), root.Get("servers"), root.Get("mcp")} {
-		c.table(table)
+	for _, table := range []struct {
+		value  any
+		nested bool
+	}{{root.Get("mcpServers"), false}, {root.Get("servers"), false}, {root.Get("mcp"), true}} {
+		c.table(table.value, table.nested)
 	}
 	if projects, ok := root.Get("projects").(wire.Object); ok {
 		if project, ok := projects.Get(cwd).(wire.Object); ok {
-			c.table(project.Get("mcpServers"))
+			c.table(project.Get("mcpServers"), false)
 		}
 	}
 	return c, nil
 }
 
 // table takes every server in one JSON table. OpenCode nests its table one level down.
-func (c *Config) table(v any) {
+func (c *Config) table(v any, nested bool) {
 	servers, _ := v.(wire.Object)
-	if nested, ok := servers.Get("servers").(wire.Object); ok && !servers.Has("command") && !servers.Has("url") {
-		servers = nested
+	if nestedTable, ok := servers.Get("servers").(wire.Object); nested && ok && isServerTable(nestedTable) {
+		servers = nestedTable
 	}
 	for _, f := range servers {
 		if entry, ok := f.Value.(wire.Object); ok {
 			c.take(f.Name, entry)
 		}
 	}
+}
+
+// isServerTable distinguishes OpenCode's mcp.servers map from a server named "servers".
+func isServerTable(table wire.Object) bool {
+	if len(table) == 0 {
+		return true
+	}
+	for _, field := range table {
+		server, ok := field.Value.(wire.Object)
+		if !ok || (server.Get("command") == nil && server.Get("url") == nil) {
+			return false
+		}
+	}
+	return true
 }
 
 // take converts one server. command may be a string with args beside it or a whole argv;

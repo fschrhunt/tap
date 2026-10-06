@@ -63,6 +63,9 @@ once. Use `start` for a server that is slow to start and that you use in most se
 An environment variable wins over the config, so a setting can differ for one agent without
 changing the file. A variable holding a value the setting does not take is ignored.
 
+A server-specific `idleTimeoutMs` is only for stdio servers and must be from 1 to 86400000.
+The general setting may be `0` to close an idle session as soon as no operation is using it.
+
 ## In the config file
 
 Settings are kept in `servers.json` beside the servers, and a server's own values in its

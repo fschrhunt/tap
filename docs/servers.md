@@ -37,6 +37,9 @@ With no argument it reads every place it knows:
 | Cursor (`cursor`) | `~/.cursor/mcp.json` |
 | VS Code (`vscode`) | `./.vscode/mcp.json` |
 
+For Claude Code, Codex and OpenCode, the home-level paths follow `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME` and `XDG_CONFIG_HOME` when set, matching those agents' config locations.
+
 Name one or more agents to read only those, or give the path of any config file with an
 `mcpServers`, `servers` or `mcp` table: `tap import codex`, `tap import ./team/mcp.json`.
 

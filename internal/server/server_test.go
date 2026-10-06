@@ -84,3 +84,19 @@ func TestIntegrationGuidanceBounded(t *testing.T) {
 		t.Fatal("array punctuation was not included in the byte budget")
 	}
 }
+
+// TestValidateRejectsUnknownToolArguments pins that misspelled top-level fields
+// are refused instead of silently becoming empty calls.
+func TestValidateRejectsUnknownToolArguments(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args wire.Object
+	}{
+		{"plugin_call", wire.Object{{Name: "tool", Value: "files.read"}, {Name: "argumnts", Value: wire.Object{}}}},
+		{"plugin_search", wire.Object{{Name: "queri", Value: "files"}}},
+	} {
+		if got := validate(test.name, test.args); !strings.Contains(got, "unknown field") {
+			t.Errorf("validate(%s) = %q, want unknown-field error", test.name, got)
+		}
+	}
+}
