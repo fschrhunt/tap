@@ -27,9 +27,7 @@ jobs:
         run: |
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG is not on main" >&2; exit 1; }
           grep -q "^## $TAG " CHANGELOG.md || { echo "CHANGELOG.md has no ## $TAG section" >&2; exit 1; }
-      - run: test -z "$(gofmt -l .)"
-      - run: go vet ./...
-      - run: go test -race ./...
+      - run: ./x check
 
   release:
     needs: check
@@ -55,7 +53,7 @@ jobs:
           for GOOS in linux darwin; do
             for GOARCH in amd64 arm64; do
               export GOOS GOARCH
-              go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/package/tap ./cmd/tap
+              ./x build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/package/tap ./cmd/tap
               tar -czf "dist/tap_${TAG}_${GOOS}_${GOARCH}.tar.gz" -C dist/package tap LICENSE
             done
           done
