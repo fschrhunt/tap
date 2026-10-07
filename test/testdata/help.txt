@@ -11,7 +11,7 @@ Examples
   tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes
   tap list
   tap search create issue
-  tap call files.read_text_file path=~/notes/todo.md
+  tap call files.read_text_file path="$HOME/notes/todo.md"
 
 Servers
   connect  point your coding agents at tap
@@ -19,7 +19,7 @@ Servers
   add      add a server
   remove   remove a server
   list     show the servers and how many tools each has
-  refresh  ask one server for its tools again
+  refresh  ask one or all servers for their tools again
   auth     sign in to a server
 
 Tools
@@ -45,8 +45,8 @@ Flags
 Environment
   TAP_CONFIG  the config file (default ~/.tap/servers.json)
   NO_COLOR    set to print help without bold headings
-  Some settings have variables of their own; see "tap config --help".
+  Some settings have variables of their own; see "tap help config".
 
-Run "tap COMMAND --help" for a command's examples and flags.
+Run "tap help COMMAND" for a command's examples and flags.
 Docs:   https://github.com/fschrhunt/tap/tree/main/docs
 Issues: https://github.com/fschrhunt/tap/issues

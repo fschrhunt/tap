@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Clarify installation, agent migration, remote pairing and examples; prefer `tap help`
+  and `tap help COMMAND` in CLI guidance while retaining `-h` and `--help` aliases.
 - Add `./x check` for shared local/CI formatting, vet, build and race tests, with
   a concise PR template that records actual verification results.
 

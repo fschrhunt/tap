@@ -26,8 +26,9 @@ Recorded rankings are a JSON object mapping each exact query to its ordered tool
 queries, duplicate ids and unknown ids are rejected. The comparator reports recall@1/5/8, mean
 reciprocal rank, absent-capability correctness and full top-eight definition **bytes**. Bytes are
 not token counts, and definition bytes alone do not include disclosure/agent-loop overhead.
-Recorded rankings have no invented latency measurements. Native retrieval timing includes index
-construction; `BenchmarkWarmSearch` measures immutable-index reuse separately.
+Recorded rankings have no invented latency measurements. Native retrieval timing measures
+ranking directly over the supplied catalogs; tap does not build a retrieval index.
+`BenchmarkRank` measures query cost at several catalog sizes.
 
 The initial development baseline had 62.5% recall@1/5/8. Field-weighted search reached 95.8% on this
 same set (23/24), while preserving the two absent cases. It still misses “notify the team”: no
@@ -118,5 +119,6 @@ numeric precision, expiry and retention overflow.
 Still required before a broad competitive claim: real multi-model agent runs, independent
 large-catalog retrieval, calibrated absent-tool tests, adversarial metadata and permission tests,
 whole-process-tree startup/memory measurements, and matched Code Mode workflows. Embedding-based
-retrieval, arbitrary code execution and OAuth are not implemented by this change; their inclusion
-should be justified by these measurements rather than feature parity alone.
+retrieval and arbitrary code execution are not implemented by tap; adding them should be
+justified by these measurements rather than feature parity alone. OAuth sign-in is supported
+for downstream HTTP servers; it is not a retrieval method or part of the offline benchmark.

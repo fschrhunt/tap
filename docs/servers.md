@@ -5,8 +5,9 @@ tap reads its servers from `~/.tap/servers.json`. Set `TAP_CONFIG` to use anothe
 Selecting a [remote](remote.md) switches discovery, calls and CLI server edits to
 the remote registry. Local servers remain saved; use CLI `--local` to edit them.
 Environment references and paths in a remote server definition resolve on the
-remote machine. Remote selection stores the URL and token environment-variable
-name alongside `servers`, never the token itself.
+remote machine. Paired remote profiles store the URL, device ID and certificate fingerprint
+alongside `servers`; device tokens stay in an owner-only `<config path>.remote-secrets.json`
+sidecar, never in the shared config.
 
 ## Bringing over an agent's servers
 
@@ -42,6 +43,8 @@ For Claude Code, Codex and OpenCode, the home-level paths follow `CLAUDE_CONFIG_
 
 Name one or more agents to read only those, or give the path of any config file with an
 `mcpServers`, `servers` or `mcp` table: `tap import codex`, `tap import ./team/mcp.json`.
+These are the locations tap checks, not every location an agent can use. For a config outside
+those locations, such as a nested project config, pass the file path explicitly.
 
 tap only reads those files. Afterwards, take the servers out of each agent's config yourself and
 leave tap there (see [Install](install.md#connect-your-agent)), so the agent loads two tools.
@@ -49,6 +52,10 @@ leave tap there (see [Install](install.md#connect-your-agent)), so the agent loa
 - A server tap already has under the same name is left alone unless you pass `--force`.
 - Values are copied as written, including tokens. To keep one out of tap's config, put it in an
   environment variable and write `${NAME}` in its place.
+- Agent-specific substitutions such as OpenCode's `{env:NAME}` are copied unchanged, not
+  translated. Change them to tap's `${NAME}` syntax in `headers` or `env` after importing.
+- Saved OAuth sign-ins are not imported. Run `tap auth NAME` for servers that need sign-in;
+  check custom agent options such as timeouts and tool permissions separately.
 - A name with a dot is imported with a dash, since tool ids are `server.tool`.
 - Servers that are turned off, that use the older SSE transport, or that are tap itself are
   skipped, each with its reason.
@@ -71,6 +78,12 @@ A stdio server: everything after `--` is the command.
 tap add files -- npx -y @modelcontextprotocol/server-filesystem ~/notes
 tap add db --env DATABASE_URL='${DATABASE_URL}' --cwd ~/code/app -- node mcp/server.mjs
 ```
+
+Addresses under `example.com` are placeholders. The filesystem example requires Node.js and
+an existing `~/notes` directory; the database example requires your own server script.
+Single quotes around `'${DATABASE_URL}'` save the reference for tap to expand later, rather
+than copying your shell's current secret into the config. Supply required variables to the
+tap process your agent starts, not just to the shell where you run `tap add`.
 
 | Flag | Meaning |
 | --- | --- |
@@ -104,7 +117,7 @@ tap auth linear
 ```
 
 `tap auth` opens the provider's sign-in page in your browser and waits for you to finish. tap
-then saves the sign-in and renews it by itself, so your agents use the server without asking.
+then saves the sign-in and renews it while the provider allows it, so your agents can reuse it.
 Agents that are already running find the server's tools on their next search. With a remote
 selected, tap runs the OAuth exchange and stores the grant on that remote while relaying the
 browser callback automatically; no SSH session or copied redirect address is needed. Use
@@ -195,6 +208,7 @@ The equivalent server entry can contain:
 ```json
 {
   "command":["node","db-server.mjs"],
+  "type":"stdio",
   "policy":{
     "allow":["query","list_*"],
     "deny":["delete_*"],

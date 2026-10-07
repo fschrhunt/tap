@@ -6,7 +6,7 @@ references you want your agent to use.
 
 ```sh
 tap config                                        # every setting and where its value comes from
-tap config set start search                       # check tools again on every search
+tap config set start search                       # refresh stale tool lists during search
 tap config set start start --server playwright    # start this one with tap and keep it running
 tap config set references on
 tap config unset start --server playwright        # back to the general value
@@ -28,6 +28,8 @@ playwright  start: start
 
 An agent's tap reads its settings when it starts, so start a new agent session after changing
 one. `tap` commands are new processes and use a change at once.
+For a remote host, restart the serving `tap remote serve` process after changing its settings.
+`tap config unset NAME` removes the saved value; it does not override an environment variable.
 
 ## When servers start
 
@@ -39,15 +41,17 @@ one. `tap` commands are new processes and use a change at once.
 | `search` | when a search needs its tools | on a search, when its list was saved by another session or is a minute old |
 | `start` | as soon as tap starts, and keeps running | while it runs |
 
-With `call`, a search answers from the tools tap last saved and marks them `stale: true`; no
-server starts for it. The first search tap ever makes for a server it has never listed still
+With `call`, a search can answer from the tools tap last saved without starting the server;
+restored or expired catalogs are marked `stale: true`. A search for a server tap has never listed still
 starts that server, since there is nothing saved to answer from. A call always starts its
 server and checks the tool against what the server lists now, whatever the setting. So `call`
 costs nothing in safety: the trade is that a tool a server adds is found by search only after
 that server has run again, or after `tap refresh`.
 
-Use `search` if your servers change their tools often and you want searches to see that at
-once. Use `start` for a server that is slow to start and that you use in most sessions.
+Use `search` if your servers change their tools often: stale lists refresh in the background.
+Use `tap refresh NAME` or `tap search QUERY --refresh` when you need to wait for a live list.
+Use `start` for a server that is slow to start and that you use in most sessions. It stays
+running unless you give that stdio server its own `idleTimeoutMs` override.
 
 ## Everything else
 
@@ -55,16 +59,15 @@ once. Use `start` for a server that is slow to start and that you use in most se
 | --- | --- | --- | --- |
 | `references` | `off` | `TAP_REFERENCES` | Offer result references to the agent: see [How it works](how-it-works.md#opt-in-result-references). Off keeps the call contract to `tool` and `arguments` |
 | `searchLimit` | `8` | | How many tools a search returns when the agent does not say. `tap search` uses it too |
-| `searchMaxBytes` | `32768` | | How much a search may return when the agent does not say; past it, schemas become summaries |
+| `searchMaxBytes` | `32768` | | MCP search byte budget when the agent does not specify one; with `detail: auto`, schemas become summaries when needed. CLI search defaults to full schemas and 16777216 bytes |
 | `deadlineMs` | `5000` | `TAP_DEADLINE_MS` | How long a server may take to connect and list its tools. A tool call itself has no limit |
-| `idleTimeoutMs` | `300000` | `TAP_IDLE_TTL_MS` | How long an unused server keeps running. A stdio server may have its own |
+| `idleTimeoutMs` | `300000` | `TAP_IDLE_TTL_MS` | How long an unused session stays open. General range: 0–86400000 ms; `0` closes as soon as idle. A stdio server override is 1–86400000 ms |
 | `retryAfterMs` | `5000` | `TAP_FAIL_TTL_MS` | How long tap waits before trying a server that failed again. `0` tries every time |
 
-An environment variable wins over the config, so a setting can differ for one agent without
-changing the file. A variable holding a value the setting does not take is ignored.
-
-A server-specific `idleTimeoutMs` is only for stdio servers and must be from 1 to 86400000.
-The general setting may be `0` to close an idle session as soon as no operation is using it.
+An environment variable wins over the corresponding general setting in the config, so a
+setting can differ for one agent without changing the file. A server's own `start` or
+`idleTimeoutMs` overrides the general value. A variable holding an invalid value is ignored.
+Set variables in the environment that launches tap; GUI agents may not inherit your shell's environment.
 
 ## In the config file
 

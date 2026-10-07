@@ -25,13 +25,26 @@ remote MCP session. An offline or older host leaves the two tools usable with ge
 guidance; `plugin_search({})` can list integrations once the host is reachable. Names on a
 direct hosted MCP connection are a host-startup snapshot; restart the host to refresh them.
 
+The examples below are MCP argument objects, not shell commands. Replace their server names,
+tool IDs and arguments with ones returned by your own `plugin_search` results.
+
 ## Discover, browse, inspect
 
 `plugin_search` supports capability search, server browsing, and exact inspection:
 
 ```json
 {"query":"create github issue"}
+```
+
+Browse one server:
+
+```json
 {"server":"github","detail":"summary","limit":8}
+```
+
+Inspect exact IDs before calling:
+
+```json
 {"ids":["github.create_issue"],"detail":"full"}
 ```
 
@@ -64,8 +77,8 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
 ## Connections and metadata
 
 - **Lazy startup:** initialization and tools/list open no downstream connections. While it
-  answers them, a serving tap reads its saved index, so the first search does not wait for it,
-  and starts only servers whose [start setting](settings.md#when-servers-start) is `start`.
+  answers them, a serving tap reads its saved index, so the first search does not wait for
+  that disk read. Separately, it starts servers whose [start setting](settings.md#when-servers-start) is `start`.
   By default (`call`) a search answers from saved tools without starting their servers; a
   server tap has never listed is started once to list it. With `search`, scoped discovery
   contacts no unrelated providers. Unscoped cold discovery contacts all selected providers, with
@@ -115,7 +128,8 @@ metadata cannot fit. `ids` and `query` are mutually exclusive. The CLI defaults 
 
 Deadlines, backoff, idle shutdown, start and references are [settings](settings.md), read when a
 tap process starts; their environment variables (`TAP_DEADLINE_MS`, `TAP_FAIL_TTL_MS`,
-`TAP_IDLE_TTL_MS`, `TAP_REFERENCES`) win over the config.
+`TAP_IDLE_TTL_MS`, `TAP_REFERENCES`) override general config settings. Per-server overrides
+still take precedence over the general value.
 
 HTTP sessions remain unwrapped so SDK protocol headers and idle notifications work. Stdio retains
 raw capture, and reads tool lists from it alone rather than decoding them twice. Application request/result metadata is forwarded; protocol identity and progress
@@ -151,7 +165,9 @@ only `tool` and `arguments`, keeping the call contract small alongside the bound
 a call that uses a reference field is refused with `reference_unavailable` before anything is
 sent. On, `plugin_call` also describes the fields below.
 
-```json
+Each line below is a separate `plugin_call` invocation (shown together as JSON Lines):
+
+```jsonl
 {"tool":"db.query","arguments":{"sql":"SELECT * FROM orders"},"resultMode":"reference"}
 {"operation":"inspect","reference":"REFERENCE","pointer":"/structuredContent/rows","offset":0,"limit":5}
 {"operation":"inspect","reference":"REFERENCE","pointer":"/content/0/text"}

@@ -85,9 +85,9 @@ func Run(ctx context.Context, args []string, version string, stdout, stderr io.W
 		for i, line := range t.usage {
 			fmt.Fprintln(stderr, map[bool]string{true: "Usage: ", false: "       "}[i == 0]+line)
 		}
-		fmt.Fprintf(stderr, "Run \"tap %s --help\" for examples.\n", m.command)
+		fmt.Fprintf(stderr, "Run \"tap help %s\" for examples.\n", m.command)
 	} else {
-		fmt.Fprintln(stderr, "Run \"tap --help\" for the commands.")
+		fmt.Fprintln(stderr, "Run \"tap help\" for the commands.")
 	}
 	return 2
 }
@@ -704,7 +704,7 @@ func (s *shell) rows(result wire.Object, backend server.Backend) {
 			where = "the remote"
 		}
 		print(s.out, "No servers yet in "+where+".", false)
-		s.hint("Run \"tap import\" to bring over the ones your agents have, or \"tap add --help\" to add one.")
+		s.hint("Run \"tap import\" to bring over the ones your agents have, or \"tap help add\" to add one.")
 		return
 	}
 	width := 0
