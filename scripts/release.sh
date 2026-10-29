@@ -4,8 +4,8 @@
 #   scripts/release.sh v1.0.0    opens a PR that names CHANGELOG.md's Unreleased section v1.0.0
 #   scripts/release.sh v1.0.0    once that PR is merged: checks CI, then asks Actions to tag
 #
-# Actions pushes the tag to start the release workflow, which builds, publishes, updates the
-# Homebrew formula and tests installation. Needs git and gh. Your checkout stays on main.
+# Actions pushes the tag to start the release workflow, which builds, publishes, proposes a
+# Homebrew formula PR and tests installation. Needs git and gh. Your checkout stays on main.
 set -eu
 
 fail() { echo "release: $*" >&2; exit 1; }

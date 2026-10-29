@@ -16,6 +16,8 @@ release checks use the same command, including `go test -race ./...`. `./x --hel
 targets; `./x fmt --check`, `./x lint`, `./x test` and `./x build` run individual checks.
 Test and build arguments are forwarded to Go.
 
+The check suite also runs offline formula-publication tests with Python 3 and Git.
+
 Tests use local fixtures and temporary configs, without network access or your
 own server config. `TestMain` builds tap and the Go MCP fixture once. The tests exercise the CLI
 and MCP over stdio, with a local Streamable HTTP peer too. Add a CHANGELOG entry for
@@ -30,3 +32,8 @@ what happened. Remove sensitive values before sharing output.
 
 By contributing, you agree that your contributions are licensed under this
 project's MIT license.
+
+Release automation proposes Homebrew formula updates in a PR for manual review
+and merge. Reruns reuse an unchanged bot-owned formula PR; a modified release
+branch stops publication for review. No formula PR is opened when main already
+contains the generated formula.
