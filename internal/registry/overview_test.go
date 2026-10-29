@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/arocomputer/tap/internal/config"
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 // TestOverviewBounds pins count and encoded-byte budgets before names leave the registry.

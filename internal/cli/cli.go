@@ -23,14 +23,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arocomputer/tap/internal/agents"
-	"github.com/arocomputer/tap/internal/auth"
-	"github.com/arocomputer/tap/internal/config"
-	"github.com/arocomputer/tap/internal/human"
-	"github.com/arocomputer/tap/internal/registry"
-	"github.com/arocomputer/tap/internal/remote"
-	"github.com/arocomputer/tap/internal/server"
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/agents"
+	"github.com/fschrhunt/tap/internal/auth"
+	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/human"
+	"github.com/fschrhunt/tap/internal/registry"
+	"github.com/fschrhunt/tap/internal/remote"
+	"github.com/fschrhunt/tap/internal/server"
+	"github.com/fschrhunt/tap/internal/wire"
 	"golang.org/x/term"
 )
 

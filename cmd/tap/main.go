@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/arocomputer/tap/internal/cli"
+	"github.com/fschrhunt/tap/internal/cli"
 )
 
 // version is populated by release builds through -X main.version.

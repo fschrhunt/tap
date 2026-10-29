@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arocomputer/tap/internal/discovery"
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/discovery"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 type corpus struct {

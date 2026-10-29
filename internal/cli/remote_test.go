@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/arocomputer/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/config"
 )
 
 // TestLegacyRemoteFailsClosed requires users to pair devices instead of reusing shared tokens.

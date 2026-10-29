@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 // Setting is one choice a person may make about how tap behaves. It is kept under its Name in

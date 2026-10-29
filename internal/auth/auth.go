@@ -26,7 +26,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 	sdk "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
@@ -361,7 +361,7 @@ func Authorize(ctx context.Context, o Options) (*Result, error) {
 		}
 	} else {
 		config.DynamicClientRegistrationConfig = &sdk.DynamicClientRegistrationConfig{Metadata: &oauthex.ClientRegistrationMetadata{
-			RedirectURIs: []string{redirect}, ClientName: "tap", ClientURI: "https://github.com/arocomputer/tap",
+			RedirectURIs: []string{redirect}, ClientName: "tap", ClientURI: "https://github.com/fschrhunt/tap",
 			GrantTypes: []string{"authorization_code", "refresh_token"}, ResponseTypes: []string{"code"},
 			TokenEndpointAuthMethod: "none", SoftwareID: "tap", SoftwareVersion: o.Version,
 		}}

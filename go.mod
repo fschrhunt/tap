@@ -1,4 +1,4 @@
-module github.com/arocomputer/tap
+module github.com/fschrhunt/tap
 
 go 1.26.0
 

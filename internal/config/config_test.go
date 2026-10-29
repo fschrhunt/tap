@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 // TestConcurrentEdits ensures relay settings and all parallel server additions survive.

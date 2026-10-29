@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	docs   = "https://github.com/arocomputer/tap/tree/main/docs"
-	issues = "https://github.com/arocomputer/tap/issues"
+	docs   = "https://github.com/fschrhunt/tap/tree/main/docs"
+	issues = "https://github.com/fschrhunt/tap/issues"
 )
 
 // topic is the help for one command: how to call it, what it does, examples first and then

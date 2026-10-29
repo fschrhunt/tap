@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 // TestSettingsPrecedence pins where a value comes from: the default, then the config, then

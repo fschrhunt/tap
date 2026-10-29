@@ -19,7 +19,7 @@ import (
 	"time"
 
 	// Track implementation changes in Go's test cache; behavior is tested only via subprocesses.
-	_ "github.com/arocomputer/tap/internal/cli"
+	_ "github.com/fschrhunt/tap/internal/cli"
 )
 
 var tapBin, fixtureBin string

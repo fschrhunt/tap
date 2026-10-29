@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Move repository links, Go imports, installation sources and OAuth client homepage to
+  `fschrhunt/tap`. Existing tap configuration, saved sign-ins and pairing remain compatible.
+
 - Clarify installation, agent migration, remote pairing and examples; prefer `tap help`
   and `tap help COMMAND` in CLI guidance while retaining `-h` and `--help` aliases.
 - Add `./x check` for shared local/CI formatting, vet, build and race tests, with
@@ -61,8 +64,8 @@
   passed; the tag builds checksummed archives for macOS and Linux with build provenance, release
   notes from the changelog, the Homebrew formula on main, and an install of the release as people
   will run it. Install with
-  `curl -fsSL https://raw.githubusercontent.com/arocomputer/tap/main/install.sh | sh` or
-  `brew tap arocomputer/tap https://github.com/arocomputer/tap && brew install arocomputer/tap/tap`.
+  `curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh` or
+  `brew tap fschrhunt/tap https://github.com/fschrhunt/tap && brew install fschrhunt/tap/tap`.
 - Settings, in a `settings` block of `servers.json` and with `tap config`: `tap config` shows
   each one, its value and where it comes from; `tap config set` and `unset` change them, and
   `--server` keeps `start` or `idleTimeoutMs` for one server. A mistyped setting is refused with

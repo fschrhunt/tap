@@ -6,7 +6,7 @@ Release binaries support macOS and Linux on `amd64` (x86-64) and `arm64`.
 ## Install with the script
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/arocomputer/tap/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh
 ```
 
 It downloads the release for this computer, checks it against the release's `checksums.txt`,
@@ -14,8 +14,8 @@ and installs into `~/.local/bin`. Run it again to update. It takes `--version vX
 one release and `--dir DIR` for another folder. Pass options to the piped script with `sh -s --`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/arocomputer/tap/main/install.sh | sh -s -- --version vX.Y.Z
-curl -fsSL https://raw.githubusercontent.com/arocomputer/tap/main/install.sh | sh -s -- --dir "$HOME/bin"
+curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh -s -- --version vX.Y.Z
+curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh -s -- --dir "$HOME/bin"
 ```
 
 Replace `vX.Y.Z` with an existing release tag. Make sure the install directory is on your
@@ -26,16 +26,16 @@ Replace `vX.Y.Z` with an existing release tag. Make sure the install directory i
 tap's repository is its own tap:
 
 ```sh
-brew tap arocomputer/tap https://github.com/arocomputer/tap
-brew install arocomputer/tap/tap
+brew tap fschrhunt/tap https://github.com/fschrhunt/tap
+brew install fschrhunt/tap/tap
 ```
 
-Update with `brew update && brew upgrade arocomputer/tap/tap`.
+Update with `brew update && brew upgrade fschrhunt/tap/tap`.
 
 ## Install from Releases
 
 Download the `linux` or `darwin` archive for `amd64` or `arm64` from
-[Releases](https://github.com/arocomputer/tap/releases), along with `checksums.txt` from the same
+[Releases](https://github.com/fschrhunt/tap/releases), along with `checksums.txt` from the same
 release. Verify the archive **before** extracting or running it, then install the binary:
 
 ```sh
@@ -54,7 +54,7 @@ Use the filename of the release you downloaded. Make sure `~/.local/bin` is on y
 With Go 1.26 or newer:
 
 ```sh
-go install github.com/arocomputer/tap/cmd/tap@latest
+go install github.com/fschrhunt/tap/cmd/tap@latest
 ```
 
 Make sure Go's binary directory (normally `~/go/bin`) is on your `PATH`.
@@ -64,7 +64,7 @@ Make sure Go's binary directory (normally `~/go/bin`) is on your `PATH`.
 Requires Go 1.26 or newer:
 
 ```sh
-git clone https://github.com/arocomputer/tap.git
+git clone https://github.com/fschrhunt/tap.git
 cd tap
 go build -o tap ./cmd/tap
 mkdir -p ~/.local/bin
@@ -77,7 +77,7 @@ built with `-ldflags "-X main.version=VERSION"`.
 ## Update
 
 Run the install script again to move to the latest release, or replace the binary with a newer
-release from [Releases](https://github.com/arocomputer/tap/releases), or repeat `go install` above.
+release from [Releases](https://github.com/fschrhunt/tap/releases), or repeat `go install` above.
 For a source checkout:
 
 ```sh
@@ -184,7 +184,7 @@ on the host, then run `tap remote pair NAME https://HOST:8443` on each client. S
 
 Take tap out of each agent's config, for example `claude mcp remove tap`, and put back any
 servers you still want there. Stop running tap processes. Remove a Homebrew installation
-with `brew uninstall arocomputer/tap/tap`; for a script or Go install, remove the installed binary:
+with `brew uninstall fschrhunt/tap/tap`; for a script or Go install, remove the installed binary:
 
 ```sh
 rm ~/.local/bin/tap      # or ~/go/bin/tap

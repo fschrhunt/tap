@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 // TestProviderRanking keeps exact provider identity ahead of identical competing operations.
