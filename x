@@ -36,6 +36,7 @@ case "$command" in
         ./x lint
         ./x build
         ./x test -race ./...
+        python3 -m unittest discover -s scripts -p "test_*.py"
         ;;
     fmt)
         if [ "${1:-}" = "--check" ]; then

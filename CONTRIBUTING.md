@@ -3,10 +3,10 @@
 Smallness is the point. Prefer the fewest moving parts that solve the problem.
 Keep changes focused and write one test for each behavior worth protecting.
 
-Use Go 1.26 or newer:
+Use Go 1.26 or newer and Python 3.9 or newer (standard library only):
 
 ```sh
-./x check                 # fmt, vet, build and race tests
+./x check                 # fmt, vet, build, race tests and release-tool tests
 ./x test ./internal/config # focused package tests
 ./x build -o tap ./cmd/tap # build the CLI
 ```
@@ -30,3 +30,15 @@ what happened. Remove sensitive values before sharing output.
 
 By contributing, you agree that your contributions are licensed under this
 project's MIT license.
+
+## Formula updates
+
+After publication, the release workflow proposes the latest release's formula
+in a release PR against main. Review and merge after required checks pass;
+automation never merges it. An unchanged formula creates no PR. Retries reuse
+only an open PR from the same author containing one formula-only automation
+commit with identical content and file mode. Human edits and closed PRs require
+manual review and are never overwritten.
+If branch creation succeeds but PR creation fails, a retry opens the PR only
+after verifying the branch has one matching formula-only automation commit
+based on main.
