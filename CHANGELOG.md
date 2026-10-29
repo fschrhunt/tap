@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Release automation proposes Homebrew formula updates through reviewed PRs.
 - Move repository links, Go imports, installation sources and OAuth client homepage to
   `fschrhunt/tap`. Existing tap configuration, saved sign-ins and pairing remain compatible.
 
