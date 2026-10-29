@@ -6,7 +6,7 @@
   </picture>
 </p>
 <p align="center">Less noise. Better agents.</p>
-<p align="center"><a href="https://github.com/arocomputer/tap/actions/workflows/ci.yml"><img src="https://github.com/arocomputer/tap/actions/workflows/ci.yml/badge.svg" alt="CI"></a></p>
+<p align="center"><a href="https://github.com/fschrhunt/tap/actions/workflows/ci.yml"><img src="https://github.com/fschrhunt/tap/actions/workflows/ci.yml/badge.svg" alt="CI"></a></p>
 
 ---
 
@@ -26,26 +26,26 @@ One binary for macOS or Linux; tap itself needs no Node runtime. The script down
 release for your machine and checks it against the release's checksums:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/arocomputer/tap/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh
 ```
 
 With Homebrew:
 
 ```sh
-brew tap arocomputer/tap https://github.com/arocomputer/tap
-brew install arocomputer/tap/tap
+brew tap fschrhunt/tap https://github.com/fschrhunt/tap
+brew install fschrhunt/tap/tap
 ```
 
 With Go 1.26 or newer:
 
 ```sh
-go install github.com/arocomputer/tap/cmd/tap@latest
+go install github.com/fschrhunt/tap/cmd/tap@latest
 ```
 
 Or build from source with Go 1.26 or newer:
 
 ```sh
-git clone https://github.com/arocomputer/tap.git
+git clone https://github.com/fschrhunt/tap.git
 cd tap
 go build -o tap ./cmd/tap
 mkdir -p ~/.local/bin

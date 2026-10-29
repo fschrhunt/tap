@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arocomputer/tap/internal/auth"
-	"github.com/arocomputer/tap/internal/config"
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/auth"
+	"github.com/fschrhunt/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

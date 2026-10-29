@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arocomputer/tap/internal/config"
+	"github.com/fschrhunt/tap/internal/config"
 )
 
 // TestInitializationWaitersCancelIndependently protects shared startup from any caller's cancellation.

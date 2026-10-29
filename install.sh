@@ -2,13 +2,13 @@
 # Installs tap from its GitHub release: the archive for this computer, checked against the
 # release's checksums, into ~/.local/bin (or $TAP_INSTALL_DIR). Run it again to update.
 #
-#   curl -fsSL https://raw.githubusercontent.com/arocomputer/tap/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/arocomputer/tap/main/install.sh | sh -s -- --version v1.0.0
+#   curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/fschrhunt/tap/main/install.sh | sh -s -- --version v1.0.0
 #
-# $TAP_RELEASES replaces https://github.com/arocomputer/tap/releases, for testing.
+# $TAP_RELEASES replaces https://github.com/fschrhunt/tap/releases, for testing.
 set -eu
 
-releases=${TAP_RELEASES:-https://github.com/arocomputer/tap/releases}
+releases=${TAP_RELEASES:-https://github.com/fschrhunt/tap/releases}
 dir=${TAP_INSTALL_DIR:-$HOME/.local/bin}
 version=${TAP_VERSION:-}
 

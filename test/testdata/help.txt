@@ -48,5 +48,5 @@ Environment
   Some settings have variables of their own; see "tap help config".
 
 Run "tap help COMMAND" for a command's examples and flags.
-Docs:   https://github.com/arocomputer/tap/tree/main/docs
-Issues: https://github.com/arocomputer/tap/issues
+Docs:   https://github.com/fschrhunt/tap/tree/main/docs
+Issues: https://github.com/fschrhunt/tap/issues

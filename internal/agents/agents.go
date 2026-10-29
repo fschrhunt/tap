@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 // Server is one server an agent has, in tap's shape, under a name tap accepts.

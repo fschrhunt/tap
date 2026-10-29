@@ -14,7 +14,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/arocomputer/tap/internal/wire"
+	"github.com/fschrhunt/tap/internal/wire"
 )
 
 // Path returns TAP_CONFIG, or the default home-relative path when it is empty.
