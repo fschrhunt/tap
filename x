@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 usage() {
     cat <<'EOF'
 usage: ./x [command] [args...]
-  check              Default; Go formatting, vet, build and race tests
+  check              Default; formula PR tests, Go formatting, vet, build and race tests
   fmt [--check]      Format Go sources, or check without writing
   lint               Run go vet
   test [args...]     Forward arguments to go test (default: ./...)
@@ -32,6 +32,7 @@ esac
 
 case "$command" in
     check)
+        python3 scripts/test-formula-pr.py
         ./x fmt --check
         ./x lint
         ./x build
