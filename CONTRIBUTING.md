@@ -34,10 +34,11 @@ project's MIT license.
 ## Formula updates
 
 After publication, the release workflow proposes the latest release's formula
-in a bot-owned PR against main. Review and merge after required checks pass;
+in a release PR against main. Review and merge after required checks pass;
 automation never merges it. An unchanged formula creates no PR. Retries reuse
-only an open bot-owned PR containing one identical formula-only automation
-commit. Human edits and closed PRs require manual review and are never overwritten.
+only an open PR from the same author containing one formula-only automation
+commit with identical content and file mode. Human edits and closed PRs require
+manual review and are never overwritten.
 If branch creation succeeds but PR creation fails, a retry opens the PR only
 after verifying the branch has one matching formula-only automation commit
-based on main. GitHub may require approval of bot PR workflows before checks run.
+based on main.

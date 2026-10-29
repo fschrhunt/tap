@@ -118,7 +118,7 @@ jobs:
     environment: release
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
     concurrency:
       group: homebrew-formula
       cancel-in-progress: false
