@@ -46,6 +46,8 @@ jobs:
           commit=$(git rev-parse HEAD)
           result=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --json status,conclusion -q '.[0] | "\(.status) \(.conclusion)"')
           [ "$result" = 'completed success' ] || { echo "CI on main ($commit) is '$result'; wait for it to pass." >&2; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "$TAG"
           GH_TOKEN="$RELEASE_TOKEN" git -c credential.helper= -c "credential.helper=!gh auth git-credential" push origin "$TAG"
 
