@@ -1,6 +1,6 @@
 # tap releases
 
-## Unreleased
+## v1.0.3 · 2026-11-02
 
 - `tap remote serve` works behind a local proxy such as `tailscale serve`; a loopback listener
   no longer refuses MCP requests that carry the proxy's public host name.
