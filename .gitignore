@@ -7,3 +7,4 @@ dist/
 /.opencode/worktrees/
 /.pi/worktrees/
 /.ask/worktrees/
+__pycache__/
