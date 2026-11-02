@@ -33,8 +33,10 @@ func validateArguments(schema any, args any) error {
 	if err != nil {
 		return &Failure{"invalid_arguments", "arguments must be JSON", "Inspect the tool's full schema."}
 	}
-	plain, err := decodeResult(ab)
-	if err != nil {
+	// Validate float64 numbers: jsonschema-go reads a json.Number as a string, which would
+	// refuse every numeric argument. The arguments sent on keep their exact representation.
+	var plain any
+	if err = json.Unmarshal(ab, &plain); err != nil {
 		return &Failure{"invalid_arguments", "arguments must be JSON", "Inspect the tool's full schema."}
 	}
 	if err = r.Validate(plain); err != nil {
