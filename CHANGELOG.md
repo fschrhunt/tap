@@ -1,6 +1,6 @@
 # tap releases
 
-## Unreleased
+## v1.0.4 · 2026-11-02
 
 - `tap call` and `plugin_call` accept numeric arguments again. Validation read every
   number as a string, so a tool with an integer or number field refused any value for it.
