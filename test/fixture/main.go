@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fschrhunt/tap/internal/wire"
@@ -224,6 +226,14 @@ func main() {
 	}
 	if path := option("--exit-file"); path != "" {
 		defer os.WriteFile(path, []byte("closed\n"), 0600)
+		// tap closes stdin, then sends SIGTERM after 250 ms; a slow exit must still record the close.
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, syscall.SIGTERM)
+		go func() {
+			<-term
+			_ = os.WriteFile(path, []byte("closed\n"), 0600)
+			os.Exit(0)
+		}()
 	}
 	s := fixture()
 	if has("--http") {
