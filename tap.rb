@@ -13,23 +13,23 @@ class Tap < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/fschrhunt/tap/releases/download/v1.0.2/tap_v1.0.2_darwin_arm64.tar.gz"
-      sha256 "14b7ce3bea45bbde4feb2f1bb4d8cce435718091be77f9dfcd6c35a344162958"
+      url 'https://github.com/fschrhunt/tap/releases/download/v1.0.3/tap_v1.0.3_darwin_arm64.tar.gz'
+      sha256 '97bc3812fa09abd4c066dca7b992c8dfce64b7854919c74f715d802d35a12884'
     end
     on_intel do
-      url "https://github.com/fschrhunt/tap/releases/download/v1.0.2/tap_v1.0.2_darwin_amd64.tar.gz"
-      sha256 "2efded60b5f874ab8a906d78a29f7a8323b98813962e589f33e5015564c22d3e"
+      url 'https://github.com/fschrhunt/tap/releases/download/v1.0.3/tap_v1.0.3_darwin_amd64.tar.gz'
+      sha256 '007ca766053282af4eb4b55d113354146af0ff162c470fb69a91101b2b75324a'
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/fschrhunt/tap/releases/download/v1.0.2/tap_v1.0.2_linux_arm64.tar.gz"
-      sha256 "fc407fb82106331046c0b84c190530963cd00082404db8cd7278ede0223702d6"
+      url 'https://github.com/fschrhunt/tap/releases/download/v1.0.3/tap_v1.0.3_linux_arm64.tar.gz'
+      sha256 'c8460f929228fd5eeee2d303f6773fedc27c2c48bd929546ad7ddb277e7c1a9e'
     end
     on_intel do
-      url "https://github.com/fschrhunt/tap/releases/download/v1.0.2/tap_v1.0.2_linux_amd64.tar.gz"
-      sha256 "2a078924392cb690167180d345aafd9738d9f7d8abc1adf83ce64ed4d0df3c14"
+      url 'https://github.com/fschrhunt/tap/releases/download/v1.0.3/tap_v1.0.3_linux_amd64.tar.gz'
+      sha256 'f5ac6dcd61056cec7bd283e2c002f3f3e6db110fbd95dcea74563d922836a775'
     end
   end
 
@@ -44,6 +44,6 @@ class Tap < Formula
   end
 
   test do
-    assert_equal "v1.0.2", shell_output("#{bin}/tap --version").strip
+    assert_equal 'v1.0.3', shell_output("#{bin}/tap --version").strip
   end
 end
