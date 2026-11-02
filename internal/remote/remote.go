@@ -71,7 +71,10 @@ func handler(path, version string, devices *deviceManager) (http.Handler, func()
 	var authMu sync.Mutex
 	authCtx, stopAuth := context.WithCancel(context.Background())
 	go e.Warm()
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{MaxRequestBodyBytes: bodyLimit, SessionTimeout: 30 * time.Minute, PropagateRequestCancellation: true})
+	// The SDK's localhost guard rejects a loopback listener's requests for any other Host, which
+	// breaks serving behind a local proxy such as `tailscale serve`. Every request here already
+	// needs a paired device's token over pinned TLS, and browser origins are checked below.
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{MaxRequestBodyBytes: bodyLimit, SessionTimeout: 30 * time.Minute, PropagateRequestCancellation: true, DisableLocalhostProtection: true})
 	mux := http.NewServeMux()
 	// Execution devices may read names, but never connector definitions or credentials.
 	mux.HandleFunc("/overview", func(w http.ResponseWriter, r *http.Request) {

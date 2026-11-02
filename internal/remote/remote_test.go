@@ -87,6 +87,31 @@ func TestOverviewRequiresDevice(t *testing.T) {
 	}
 }
 
+// TestServesBehindLocalProxy covers a loopback listener reached through a proxy, which forwards
+// the client's own Host, like `tailscale serve` in front of `--addr 127.0.0.1:8443`.
+func TestServesBehindLocalProxy(t *testing.T) {
+	host, manager := testHost(t, filepath.Join(t.TempDir(), "servers.json"))
+	_, token, err := manager.enroll(manager.execCode, "proxied", "execution")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`
+	request, _ := http.NewRequest(http.MethodPost, host.URL+"/mcp", strings.NewReader(body))
+	request.Host = "tap-host:8443"
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	response, err := host.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("proxied initialize returned %d: %s", response.StatusCode, data)
+	}
+}
+
 // TestOverviewFailureDoesNotPreventServing covers old, broken and oversized host responses.
 func TestOverviewFailureDoesNotPreventServing(t *testing.T) {
 	for _, tc := range []struct {
