@@ -58,7 +58,7 @@ type result struct {
 	stdout, stderr string
 }
 type box struct {
-	t      *testing.T
+	t      testing.TB
 	config string
 	// env is appended to the command's environment, where a later entry wins over an earlier
 	// one: tests set HOME, PATH and the like without inheriting the caller's.
@@ -66,7 +66,7 @@ type box struct {
 }
 
 // sandbox creates a registry with no access to the caller's personal configuration.
-func sandbox(t *testing.T) *box {
+func sandbox(t testing.TB) *box {
 	t.Helper()
 	return &box{t: t, config: filepath.Join(t.TempDir(), "servers.json")}
 }
@@ -100,7 +100,7 @@ func (b *box) run(args ...string) result {
 }
 
 // output requires CLI success before inspecting its stdout.
-func output(t *testing.T, r result) string {
+func output(t testing.TB, r result) string {
 	t.Helper()
 	if r.status != 0 {
 		t.Fatalf("exit %d: %s", r.status, r.stderr)
@@ -109,7 +109,7 @@ func output(t *testing.T, r result) string {
 }
 
 // decode converts JSON into plain values for semantic black-box assertions.
-func decode(t *testing.T, s string) any {
+func decode(t testing.TB, s string) any {
 	t.Helper()
 	var v any
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
@@ -119,7 +119,7 @@ func decode(t *testing.T, s string) any {
 }
 
 // equal reports the complete compared values on a mismatch.
-func equal(t *testing.T, got, want any) {
+func equal(t testing.TB, got, want any) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v\nwant %#v", got, want)
@@ -127,7 +127,7 @@ func equal(t *testing.T, got, want any) {
 }
 
 // contains asserts a useful substring without obscuring actual output on failure.
-func contains(t *testing.T, s, part string) {
+func contains(t testing.TB, s, part string) {
 	t.Helper()
 	if !strings.Contains(s, part) {
 		t.Fatalf("%q does not contain %q", s, part)
@@ -177,7 +177,7 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 func (b *lockedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
 
 type harness struct {
-	t       *testing.T
+	t       testing.TB
 	config  string
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
@@ -188,7 +188,7 @@ type harness struct {
 }
 
 // start negotiates an MCP session with a subprocess, retaining its stdin for EOF tests.
-func start(t *testing.T, servers map[string]any) *harness {
+func start(t testing.TB, servers map[string]any) *harness {
 	t.Helper()
 	if servers == nil {
 		servers = map[string]any{"fixture": definition()}
@@ -197,10 +197,18 @@ func start(t *testing.T, servers map[string]any) *harness {
 }
 
 // startRoot launches a public stdio relay with the complete isolated config.
-func startRoot(t *testing.T, root map[string]any) *harness {
+func startRoot(t testing.TB, root map[string]any) *harness {
 	t.Helper()
 	b := sandbox(t)
 	b.write(root)
+	h := startBox(t, b)
+	t.Cleanup(h.close)
+	return h
+}
+
+// startBox reuses an isolated registry; the caller must arrange h.close.
+func startBox(t testing.TB, b *box) *harness {
+	t.Helper()
 	h := &harness{t: t, config: b.config, replies: make(chan map[string]any, 32), done: make(chan error, 1)}
 	h.cmd = exec.Command(tapBin)
 	h.cmd.Env = append(os.Environ(), "TAP_CONFIG="+h.config, "TAP_DEADLINE_MS=500", "TAP_CACHE_DIR="+filepath.Join(filepath.Dir(h.config), "cache"))
@@ -234,17 +242,19 @@ func startRoot(t *testing.T, root map[string]any) *harness {
 		close(h.replies)
 	}()
 	go func() { h.done <- h.cmd.Wait(); close(h.done) }()
-	t.Cleanup(func() {
-		h.stdin.Close()
-		select {
-		case <-h.done:
-		case <-time.After(3 * time.Second):
-			h.cmd.Process.Kill()
-			<-h.done
-			t.Error("tap had to be killed instead of exiting")
-		}
-	})
 	return h
+}
+
+// close waits for shutdown, including when called before registered cleanup.
+func (h *harness) close() {
+	h.stdin.Close()
+	select {
+	case <-h.done:
+	case <-time.After(3 * time.Second):
+		h.cmd.Process.Kill()
+		<-h.done
+		h.t.Error("tap had to be killed instead of exiting")
+	}
 }
 
 // request correlates JSON-RPC responses and bounds each request like the Node harness.
