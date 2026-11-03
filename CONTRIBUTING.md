@@ -31,7 +31,7 @@ what happened. Remove sensitive values before sharing output.
 By contributing, you agree that your contributions are licensed under this
 project's MIT license.
 
-Dependabot groups dependency and GitHub Actions updates into one weekly pull request. Review changes and required checks before merging.
+Dependabot opens one weekly pull request for dependency and GitHub Actions updates. Review changes and required checks before merging.
 
 ## Formula updates
 
