@@ -225,6 +225,8 @@ func main() {
 		return
 	}
 	if path := option("--exit-file"); path != "" {
+		// Let writes to a closed stdout fail without skipping the exit marker.
+		signal.Ignore(syscall.SIGPIPE)
 		defer os.WriteFile(path, []byte("closed\n"), 0600)
 		// tap closes stdin, then sends SIGTERM after 250 ms; a slow exit must still record the close.
 		term := make(chan os.Signal, 1)
