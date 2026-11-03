@@ -44,7 +44,6 @@ func wrong(command, format string, args ...any) error {
 	return &misuse{command, fmt.Sprintf(format, args...)}
 }
 
-// shell is one invocation: where it writes, whether a person is watching, and the engine.
 type shell struct {
 	ctx         context.Context
 	engine      *registry.Engine
@@ -59,7 +58,6 @@ type shell struct {
 	plain []string
 }
 
-// terminal reports whether w is an interactive terminal.
 func terminal(w any) bool {
 	f, ok := w.(*os.File)
 	return ok && term.IsTerminal(int(f.Fd()))
@@ -92,7 +90,6 @@ func Run(ctx context.Context, args []string, version string, stdout, stderr io.W
 	return 2
 }
 
-// hint tells a watching person what to do next.
 func (s *shell) hint(format string, args ...any) {
 	if s.watched {
 		fmt.Fprintf(s.errOut, format+"\n", args...)
@@ -115,7 +112,6 @@ func (s *shell) during(message string, work func() error) error {
 	return err
 }
 
-// repeated collects a flag that may be given more than once.
 type repeated []string
 
 func (r *repeated) String() string     { return strings.Join(*r, ",") }
@@ -179,7 +175,6 @@ func print(w io.Writer, value any, json bool) {
 	}
 }
 
-// run dispatches one invocation.
 func (s *shell) run(args []string) (int, error) {
 	e := s.engine
 	// Arguments after -- belong to a server's command, so help and flags are looked for before it.
@@ -687,7 +682,6 @@ func reason(text string) string {
 	return text
 }
 
-// tools counts tools in words.
 func tools(count any) string {
 	if wire.String(count) == "1" {
 		return "1 tool"
@@ -1326,7 +1320,6 @@ func (s *shell) imports(args []string) (int, error) {
 	return 0, nil
 }
 
-// browser opens a page in the person's browser.
 func browser(page string) error {
 	opener := "xdg-open"
 	if runtime.GOOS == "darwin" {

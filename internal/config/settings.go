@@ -75,7 +75,6 @@ func Current(path string) ([]Value, error) {
 	return current(root), nil
 }
 
-// current reads every setting from a config already read.
 func current(root wire.Object) []Value {
 	block, _ := root.Get("settings").(wire.Object)
 	out := make([]Value, len(Settings))
@@ -240,7 +239,6 @@ func text(v any) string {
 	return wire.String(v)
 }
 
-// choice takes one of the options as written.
 func choice(options ...string) func(string) (any, error) {
 	return func(s string) (any, error) {
 		if slices.Contains(options, s) {
@@ -250,7 +248,6 @@ func choice(options ...string) func(string) (any, error) {
 	}
 }
 
-// toggle takes on or off, and true, false, 1 or 0 as the same.
 func toggle(s string) (any, error) {
 	switch s {
 	case "on", "true", "1":

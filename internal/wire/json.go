@@ -430,7 +430,6 @@ func (p *parser) span() (escaped, ok bool) {
 	return escaped, false
 }
 
-// word consumes a literal when the input continues with it.
 func (p *parser) word(literal string) bool {
 	if !bytes.HasPrefix(p.data[p.at:], []byte(literal)) {
 		return false
@@ -515,7 +514,6 @@ func decodeTokens(data []byte, exact bool) (any, error) {
 	return v, nil
 }
 
-// decode reads one recursive JSON value from a token stream.
 func decode(d *json.Decoder) (any, error) {
 	t, err := d.Token()
 	if err != nil {

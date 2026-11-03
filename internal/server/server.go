@@ -182,10 +182,8 @@ func integrationGuidance(overview registry.IntegrationOverview) string {
 	return text
 }
 
-// text is one text content item.
 func text(t string) []mcp.Content { return []mcp.Content{&mcp.TextContent{Text: t}} }
 
-// textResult returns a formatted catalog or search result as MCP text content.
 func textResult(value any) *mcp.CallToolResult {
 	b, _ := wire.JSON(value, true)
 	return &mcp.CallToolResult{Content: text(string(b))}

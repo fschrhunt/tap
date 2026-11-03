@@ -44,8 +44,9 @@ or modify a personal server config for tests.
 ## Conventions
 
 Use the fewest moving parts. Keep Go and the official MCP Go SDK for both server and clients.
-Comment modules and functions with their purpose and contract; avoid line-by-line
-comments. Update comments and docs when behavior changes.
+Document public contracts and non-obvious constraints or reasons, especially security
+and lifecycle rationale. Omit comments that merely narrate clear names or code.
+Update comments and docs when behavior changes.
 
 Write one focused test per behavior change, using `testing`. Tests must be
 hermetic and offline. Add a CHANGELOG entry for user-visible changes.
