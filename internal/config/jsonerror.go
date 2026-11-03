@@ -25,7 +25,6 @@ type jsonDiagnostic struct {
 	i int
 }
 
-// space skips precisely the whitespace permitted by JSON.
 func (p *jsonDiagnostic) space() {
 	for p.i < len(p.s) && strings.ContainsRune(" \t\r\n", rune(p.s[p.i])) {
 		p.i++
@@ -144,7 +143,6 @@ func (p *jsonDiagnostic) object() string {
 	}
 }
 
-// array distinguishes missing elements from missing separators.
 func (p *jsonDiagnostic) array() string {
 	p.i++
 	p.space()
@@ -168,7 +166,6 @@ func (p *jsonDiagnostic) array() string {
 	}
 }
 
-// quoted recognizes escape failures and unterminated strings.
 func (p *jsonDiagnostic) quoted() string {
 	p.i++
 	for p.i < len(p.s) {
@@ -202,10 +199,8 @@ func (p *jsonDiagnostic) quoted() string {
 	return p.position("Unterminated string")
 }
 
-// digit reports whether the current byte is a decimal digit.
 func (p *jsonDiagnostic) digit() bool { return p.i < len(p.s) && p.s[p.i] >= '0' && p.s[p.i] <= '9' }
 
-// number identifies malformed signs, fractions and exponents.
 func (p *jsonDiagnostic) number() string {
 	if p.s[p.i] == '-' {
 		p.i++

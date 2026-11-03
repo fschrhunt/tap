@@ -135,7 +135,6 @@ var topics = []topic{
 	{name: "help", group: "Other", summary: "show help for tap or one command", usage: []string{"tap help [COMMAND]"}, page: "cli.md"},
 }
 
-// find returns a command's help.
 func find(name string) *topic {
 	for i := range topics {
 		if topics[i].name == name {
@@ -145,14 +144,11 @@ func find(name string) *topic {
 	return nil
 }
 
-// printer writes help with headings that are bold on a terminal and plain anywhere else.
 type printer struct {
 	w    io.Writer
 	bold bool
 }
 
-// styled reports whether text written to w may carry escape codes: only a terminal that has
-// not asked for none.
 func styled(w io.Writer) bool {
 	return terminal(w) && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
 }
@@ -239,7 +235,6 @@ func full(w io.Writer, version string) {
 	fmt.Fprintf(w, "\nRun \"tap help COMMAND\" for a command's examples and flags.\nDocs:   %s\nIssues: %s\n", docs, issues)
 }
 
-// explain prints one command's help: usage, what it does, examples, flags, and its page.
 func explain(w io.Writer, t *topic) {
 	p := printer{w, styled(w)}
 	p.heading("Usage")
