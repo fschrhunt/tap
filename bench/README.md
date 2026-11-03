@@ -30,6 +30,23 @@ Recorded rankings have no invented latency measurements. Native retrieval timing
 ranking directly over the supplied catalogs; tap does not build a retrieval index.
 `BenchmarkRank` measures query cost at several catalog sizes.
 
+Measure the real gateway and backend subprocesses separately from ranking:
+
+```sh
+GOPROXY=off GOSUMDB=off go test ./test -run '^$' \
+  -bench '^BenchmarkDiscoveryCall$' -benchtime=20x -count=5
+```
+
+Each operation discovers the fixture's echo tool, calls its returned ID and checks
+the exact answer. `cold` includes gateway startup, MCP negotiation, backend startup,
+discovery and the call, with disk metadata removed before each sample. `warm` reuses
+both processes after an untimed successful operation. Builds, config creation, cache
+removal and shutdown are untimed; client JSON handling and checks are timed. Go's
+`ns/op` is a mean; `-count` repeats the measurement, not a p95 estimate. This tiny
+local fixture measures relay overhead, not live integrations, agent quality, memory
+or OS filesystem-cache coldness. Keep Go version, hardware and race mode fixed.
+Run timings without concurrent builds or tests; background load can dominate this fixture.
+
 The initial development baseline had 62.5% recall@1/5/8. Field-weighted search reached 95.8% on this
 same set (23/24), while preserving the two absent cases. It still misses “notify the team”: no
 semantic model is present. These figures demonstrate a local regression baseline, **not** a win
