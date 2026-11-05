@@ -2,7 +2,8 @@
 
 ## Commands
 
-- `./x check` (the default) checks Go formatting, vet, build and race tests without rewriting sources.
+- `./x check` (the default) checks Go formatting, vet, build, race tests and release packaging without rewriting sources.
+- `./x package-check` builds and verifies all four release archives and the formula tooling offline.
 - `./x --help` lists targets; `./x test` and `./x build` forward Go arguments.
 
 - `go build -o tap ./cmd/tap` builds the binary (Go 1.26 or newer).
@@ -37,9 +38,16 @@ or modify a personal server config for tests.
 - `docs/`: user docs with examples; update them with any user-visible change.
 - `install.sh` and `tap.rb`: the checksum-verified installer and the Homebrew formula the
   release workflow regenerates; tap's repository is its own tap.
-- `scripts/`: `release.sh` (name the changelog section, then dispatch Actions after CI passes) and
-  `formula.sh` (write `tap.rb` from a release's checksums).
+- `.github/release/`: `release.sh` (name the changelog section, then dispatch Actions after CI passes),
+  `package.sh` (build archives), and the formula generator, PR helper and offline tests.
 - `assets/`: the logo, wordmark and lockup SVGs in black and white; see `assets/README.md`.
+
+Release packaging needs Python 3 and `sha256sum` or `shasum` as well as Go. Run
+`TAG=vX.Y.Z .github/release/package.sh [DIR]` from the root to build archives and
+`checksums.txt` in `DIR` (default `dist`), without publishing. `./x package-check`
+builds into a temporary directory by default; `TAG=vX.Y.Z TAP_PACKAGE_DIR=DIR
+./x package-check` verifies existing artifacts instead. CI checks the exact archives
+before publication. Native version checks run only for the host platform.
 
 ## Conventions
 

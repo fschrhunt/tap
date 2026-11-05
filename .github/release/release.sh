@@ -1,8 +1,8 @@
 #!/bin/sh
 # Releases tap, from an up-to-date main checkout, in two runs of the same command:
 #
-#   scripts/release.sh v1.0.0    opens a PR that names CHANGELOG.md's Unreleased section v1.0.0
-#   scripts/release.sh v1.0.0    once that PR is merged: checks CI, then asks Actions to tag
+#   .github/release/release.sh v1.0.0    opens a PR that names CHANGELOG.md's Unreleased section v1.0.0
+#   .github/release/release.sh v1.0.0    once that PR is merged: checks CI, then asks Actions to tag
 #
 # Actions pushes the tag to start the release workflow, which builds, publishes, updates the
 # Homebrew formula and tests installation. Needs git and gh. Your checkout stays on main.
@@ -10,7 +10,7 @@ set -eu
 
 fail() { echo "release: $*" >&2; exit 1; }
 tag=${1:-}
-case $tag in v[0-9]*.[0-9]*.[0-9]*) ;; *) fail "usage: scripts/release.sh vX.Y.Z" ;; esac
+case $tag in v[0-9]*.[0-9]*.[0-9]*) ;; *) fail "usage: .github/release/release.sh vX.Y.Z" ;; esac
 command -v gh >/dev/null 2>&1 || fail "needs gh, the GitHub CLI"
 cd "$(git rev-parse --show-toplevel)"
 
@@ -31,8 +31,8 @@ if ! grep -q "^## $tag " CHANGELOG.md; then
   sed "s/^## Unreleased\$/## $tag · $(date -u +%Y-%m-%d)/" CHANGELOG.md > "$work/CHANGELOG.md"
   git -C "$work" commit -qam "release: $tag"
   git -C "$work" push -q -u origin "release/$tag"
-  (cd "$work" && gh pr create --title "release: $tag" --body "Names the Unreleased changelog section $tag. After merging, run \`scripts/release.sh $tag\` on main to start the Actions release.")
-  echo "Merge that pull request, pull main, then run scripts/release.sh $tag again."
+  (cd "$work" && gh pr create --title "release: $tag" --body "Names the Unreleased changelog section $tag. After merging, run \`.github/release/release.sh $tag\` on main to start the Actions release.")
+  echo "Merge that pull request, pull main, then run .github/release/release.sh $tag again."
   exit 0
 fi
 

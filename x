@@ -7,8 +7,9 @@ cd "$(dirname "$0")"
 usage() {
     cat <<'EOF'
 usage: ./x [command] [args...]
-  check              Default; Go formatting, vet, build and race tests
+  check              Default; Go formatting, vet, build, race and release tests
   fmt [--check]      Format Go sources, or check without writing
+  package-check      Build and verify release archives and formula tooling (offline)
   lint               Run go vet
   test [args...]     Forward arguments to go test (default: ./...)
   build [args...]    Forward arguments to go build (default: ./...)
@@ -23,7 +24,7 @@ command=${1-check}
 if [ "$#" -gt 0 ]; then shift; fi
 
 case "$command" in
-    check|lint) [ "$#" -eq 0 ] || invalid ;;
+    check|lint|package-check) [ "$#" -eq 0 ] || invalid ;;
     fmt)
         [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = "--check" ]; } || invalid
         ;;
@@ -36,7 +37,10 @@ case "$command" in
         ./x lint
         ./x build
         ./x test -race ./...
-        python3 -m unittest discover -s scripts -p "test_*.py"
+        ./x package-check
+        ;;
+    package-check)
+        python3 -m unittest discover -s .github/release -p "test_*.py"
         ;;
     fmt)
         if [ "${1:-}" = "--check" ]; then

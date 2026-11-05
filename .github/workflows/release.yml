@@ -2,7 +2,7 @@ name: Release
 
 # A tag vX.Y.Z on main releases tap: the same checks as CI, archives for macOS and Linux with
 # checksums and build provenance, notes from CHANGELOG.md, a Homebrew formula PR, and a
-# real install of the release on both systems. scripts/release.sh asks Actions to make the tag.
+# real install of the release on both systems. .github/release/release.sh asks Actions to make the tag.
 on:
   push:
     tags: ['v*']
@@ -88,17 +88,12 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           CGO_ENABLED: '0'
-        run: |
-          mkdir -p dist/package
-          cp LICENSE dist/package/
-          for GOOS in linux darwin; do
-            for GOARCH in amd64 arm64; do
-              export GOOS GOARCH
-              ./x build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/package/tap ./cmd/tap
-              tar -czf "dist/tap_${TAG}_${GOOS}_${GOARCH}.tar.gz" -C dist/package tap LICENSE
-            done
-          done
-          (cd dist && sha256sum -- *.tar.gz > checksums.txt)
+        run: .github/release/package.sh
+      - name: Verify the packaged release
+        env:
+          TAG: ${{ github.ref_name }}
+          TAP_PACKAGE_DIR: dist
+        run: ./x package-check
       # Proves each archive was built here, from this tag: gh attestation verify FILE -R fschrhunt/tap
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -142,8 +137,8 @@ jobs:
           latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
           test "$TAG" = "$latest" || { echo "Not the latest stable release; leaving the formula unchanged."; exit 0; }
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p checksums.txt -O "$RUNNER_TEMP/checksums.txt"
-          scripts/formula.sh "$TAG" "$RUNNER_TEMP/checksums.txt" > tap.rb
-          python3 scripts/formula_pr.py
+          .github/release/formula.sh "$TAG" "$RUNNER_TEMP/checksums.txt" > tap.rb
+          python3 .github/release/formula_pr.py
 
   install:
     needs: release
