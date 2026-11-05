@@ -68,7 +68,7 @@
 
 ## v1.0.0 · 2026-10-02
 
-- Releases: `scripts/release.sh` names the Unreleased section in a PR, then tags it once CI has
+- Releases: `.github/release/release.sh` names the Unreleased section in a PR, then tags it once CI has
   passed; the tag builds checksummed archives for macOS and Linux with build provenance, release
   notes from the changelog, the Homebrew formula on main, and an install of the release as people
   will run it. Install with

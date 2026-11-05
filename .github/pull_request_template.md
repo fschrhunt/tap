@@ -4,6 +4,6 @@
 
 ## Verification
 
-- `./x check`: <!-- Result; runs fmt/vet/build/race tests. -->
+- `./x check`: <!-- Result; runs fmt/vet/build/race and release packaging tests. -->
 
 <!-- Note focused tests and docs/changelog updates where relevant. Explain failures or N/A. -->
