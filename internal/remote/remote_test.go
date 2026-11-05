@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -493,6 +494,20 @@ func TestTLSRelay(t *testing.T) {
 	}
 	if !strings.HasPrefix(s.URL, "https://") {
 		t.Fatalf("paired relay is not HTTPS: %s", s.URL)
+	}
+}
+
+// TestConnectErrorNamesHostAndCause keeps an unresolvable host distinguishable from a
+// rejected connection, so a renamed machine points at DNS instead of a generic failure.
+func TestConnectErrorNamesHostAndCause(t *testing.T) {
+	const endpoint = "https://fat:8443/mcp"
+	resolve := connectError(endpoint, &net.DNSError{Err: "no such host", Name: "fat"})
+	if !strings.Contains(resolve.Error(), "cannot resolve remote "+endpoint) || !strings.Contains(resolve.Error(), "no such host") {
+		t.Fatalf("dns error lost its host or cause: %v", resolve)
+	}
+	refused := connectError(endpoint, errors.New("connection refused"))
+	if !strings.Contains(refused.Error(), "cannot connect to remote "+endpoint) || !strings.Contains(refused.Error(), "connection refused") {
+		t.Fatalf("connect error lost its host or cause: %v", refused)
 	}
 }
 

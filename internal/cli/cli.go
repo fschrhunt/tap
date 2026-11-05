@@ -457,7 +457,7 @@ func (s *shell) backend(local bool) (server.Backend, func(), error) {
 		}
 		if cfg != nil {
 			s.hint("Using selected %s.", selectedTarget(s.engine.Path))
-			relay, err := remote.New(*cfg, s.engine.Version)
+			relay, err := remote.NewSelected(s.engine.Path, *cfg, s.engine.Version)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1645,7 +1645,7 @@ func (s *shell) remote(args []string) (int, error) {
 			}
 			print(s.out, label+": "+cfg.URL+" (configured; reachability not checked; "+detail+")", false)
 			if *check {
-				relay, err := remote.New(*cfg, version)
+				relay, err := remote.NewSelected(s.engine.Path, *cfg, version)
 				if err != nil {
 					return 1, err
 				}

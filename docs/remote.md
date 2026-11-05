@@ -78,6 +78,9 @@ with a five-second deadline, so instructions and the search description identify
 the services available through tap. No downstream connector starts for this request.
 The remote MCP session is opened only when needed. Offline or older hosts leave
 generic discovery usable; restart the relay to refresh its advertised name snapshot.
+After a failed connection, the relay reloads the selected profile from
+`~/.tap/servers.json` and retries once, so a renamed host or an edited URL heals
+without restarting the agent's MCP process.
 
 ## Add once, discover everywhere
 

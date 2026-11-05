@@ -23,7 +23,7 @@ Servers
   auth     sign in to a server
 
 Tools
-  search   find tools, the way your agent does
+  search   preview the tool search your agent gets
   inspect  print one tool's whole contract
   call     call a tool
 
