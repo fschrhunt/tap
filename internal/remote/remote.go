@@ -468,6 +468,7 @@ func Serve(ctx context.Context, path, version string, opts Options) error {
 // Client shares one remote MCP session and reconnects after it closes.
 type Client struct {
 	cfg     config.Remote
+	path    string
 	version string
 	http    *http.Client
 	mu      sync.Mutex
@@ -488,24 +489,89 @@ type initialization struct {
 
 // New validates a paired relay and loads its owner-only device credential.
 func New(cfg config.Remote, version string) (*Client, error) {
-	if cfg.PeerID == "" {
-		return nil, fmt.Errorf("legacy token remotes are no longer supported; pair this device with \"tap remote pair NAME HTTPS_URL\"")
-	}
-	endpoint, err := config.NormalizeURL(cfg.URL, false)
+	httpClient, endpoint, err := transport(cfg)
 	if err != nil {
 		return nil, err
 	}
 	cfg.URL = endpoint
+	lifetime, cancel := context.WithCancel(context.Background())
+	return &Client{ctx: lifetime, cancel: cancel, cfg: cfg, version: version, http: httpClient}, nil
+}
+
+// NewSelected is New for a profile loaded from path. Only these clients reload their
+// profile after a failed connection; an explicit profile (tests, one-off URLs) is fixed.
+func NewSelected(path string, cfg config.Remote, version string) (*Client, error) {
+	client, err := New(cfg, version)
+	if err != nil {
+		return nil, err
+	}
+	client.path = path
+	return client, nil
+}
+
+// transport validates a profile and builds its redirect-free, pinned HTTP client. The
+// normalized endpoint is returned so callers store exactly what they dial.
+func transport(cfg config.Remote) (*http.Client, string, error) {
+	if cfg.PeerID == "" {
+		return nil, "", fmt.Errorf("legacy token remotes are no longer supported; pair this device with \"tap remote pair NAME HTTPS_URL\"")
+	}
+	endpoint, err := config.NormalizeURL(cfg.URL, false)
+	if err != nil {
+		return nil, "", err
+	}
 	token := cfg.Token
 	if token == "" {
-		return nil, fmt.Errorf("paired remote credentials are missing; pair this device again")
+		return nil, "", fmt.Errorf("paired remote credentials are missing; pair this device again")
 	}
-	lifetime, cancel := context.WithCancel(context.Background())
 	base := http.RoundTripper(nil)
 	if cfg.Fingerprint != "" {
 		base = pinnedTransport(cfg.Fingerprint)
 	}
-	return &Client{ctx: lifetime, cancel: cancel, cfg: cfg, version: version, http: &http.Client{Transport: bearerTransport{token: token, base: base}, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("remote redirects are forbidden") }}}, nil
+	client := &http.Client{Transport: bearerTransport{token: token, base: base}, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("remote redirects are forbidden") }}
+	return client, endpoint, nil
+}
+
+// target snapshots the endpoint and HTTP client so a concurrent refresh cannot mix them.
+func (c *Client) target() (config.Remote, *http.Client) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg, c.http
+}
+
+// refresh reloads the selected remote after a failed connection, so a renamed host or an
+// edited profile does not require restarting the MCP host process. It reports whether the
+// profile actually changed, together with the client that dials it.
+func (c *Client) refresh() (config.Remote, *http.Client, bool) {
+	if c.path == "" {
+		return config.Remote{}, nil, false
+	}
+	cfg, err := config.LoadRemote(c.path)
+	if err != nil || cfg == nil {
+		return config.Remote{}, nil, false
+	}
+	current, _ := c.target()
+	if cfg.URL == current.URL && cfg.PeerID == current.PeerID && cfg.Token == current.Token && cfg.Fingerprint == current.Fingerprint {
+		return config.Remote{}, nil, false
+	}
+	httpClient, endpoint, err := transport(*cfg)
+	if err != nil {
+		return config.Remote{}, nil, false
+	}
+	cfg.URL = endpoint
+	c.mu.Lock()
+	c.cfg, c.http = *cfg, httpClient
+	c.mu.Unlock()
+	return *cfg, httpClient, true
+}
+
+// connectError names the remote and preserves the cause; a hostname that no longer
+// resolves must not be reported as a generic connection failure.
+func connectError(endpoint string, err error) error {
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return fmt.Errorf("cannot resolve remote %s: %w", endpoint, err)
+	}
+	return fmt.Errorf("cannot connect to remote %s: %w", endpoint, err)
 }
 
 // pinnedTransport encrypts traffic and accepts only the server certificate paired out of band.
@@ -675,17 +741,32 @@ func (c *Client) connect(ctx context.Context) (*mcp.ClientSession, error) {
 	}
 }
 
+// dialRemote opens one MCP session against a target. The remote's two tool names never
+// change, so discovery happens through calls and no notification stream is needed.
+func dialRemote(ctx context.Context, endpoint string, httpClient *http.Client, version string) (*mcp.ClientSession, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "tap", Version: version}, nil)
+	return client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: httpClient, MaxRetries: -1, MaxEventSize: wire.MaxMessageBytes, DisableStandaloneSSE: true}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"})
+}
+
 // open owns the initialization deadline independently of the callers waiting for it.
 func (c *Client) open(pending *initialization) {
 	defer c.workers.Done()
 	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	defer cancel()
-	client := mcp.NewClient(&mcp.Implementation{Name: "tap", Version: c.version}, nil)
-	// The remote's two tool names never change; discovery happens through calls,
-	// so a relay needs no extra persistent notification stream.
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, HTTPClient: c.http, MaxRetries: -1, MaxEventSize: wire.MaxMessageBytes, DisableStandaloneSSE: true}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"})
+	cfg, httpClient := c.target()
+	session, err := dialRemote(ctx, cfg.URL, httpClient, c.version)
 	if err != nil {
-		err = fmt.Errorf("cannot connect to remote")
+		// A renamed host or an edited profile leaves the cached target stale; reload once
+		// before reporting failure so a long-lived MCP host heals without a restart.
+		if fresh, freshClient, changed := c.refresh(); changed {
+			session, err = dialRemote(ctx, fresh.URL, freshClient, c.version)
+			if err == nil {
+				cfg = fresh
+			}
+		}
+	}
+	if err != nil {
+		err = connectError(cfg.URL, err)
 	}
 	c.mu.Lock()
 	if c.closed {

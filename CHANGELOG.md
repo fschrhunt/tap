@@ -1,5 +1,13 @@
 # tap releases
 
+## Unreleased
+
+- Remote connection failures now name the endpoint and preserve the underlying cause, so an
+  unresolvable host is distinguishable from a rejected connection.
+- A selected remote reloads its profile and retries once after a failed connection, so a
+  renamed host or an edited URL no longer requires restarting the agent's MCP process.
+- The `tap search` summary now reads "preview the tool search your agent gets".
+
 ## v1.0.4 · 2026-11-02
 
 - `tap call` and `plugin_call` accept numeric arguments again. Validation read every

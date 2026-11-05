@@ -80,7 +80,7 @@ var topics = []topic{
 			{"    --no-browser", "print the page's address instead of opening it"},
 			{"    --local", "use this machine's registry instead of the selected remote"},
 			{"    --remove", "forget the sign-in"}}},
-	{name: "search", group: "Tools", summary: "find tools, the way your agent does", page: "cli.md#search",
+	{name: "search", group: "Tools", summary: "preview the tool search your agent gets", page: "cli.md#search",
 		usage: []string{"tap search QUERY... [--server NAME] [--limit N] [--json]", "tap search --server NAME"},
 		about: "Prints the tools that best match the query, with the id to call each by. Words are\n" +
 			"matched against a tool's name, its server, its title, description and parameters. With\n" +
