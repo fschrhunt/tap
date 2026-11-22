@@ -18,8 +18,8 @@ Test and build arguments are forwarded to Go.
 
 Tests use local fixtures and temporary configs, without network access or your
 own server config. `TestMain` builds tap and the Go MCP fixture once. The tests exercise the CLI
-and MCP over stdio, with a local Streamable HTTP peer too. Add a CHANGELOG entry for
-user-visible changes.
+and MCP over stdio, with a local Streamable HTTP peer too. Release notes are written when
+releasing.
 
 Set `TAP_CONFIG` to a temporary file when trying config commands manually; never test against
 your personal server registry. `TAP_TEST_RACE=1 ./x check` race-builds the black-box subprocesses too.

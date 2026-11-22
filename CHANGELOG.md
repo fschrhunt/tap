@@ -1,5 +1,8 @@
 # tap releases
 
+Written by each release, newest first; the same notes are on
+[GitHub Releases](https://github.com/fschrhunt/tap/releases).
+
 ## Unreleased
 
 - Remote connection failures now name the endpoint and preserve the underlying cause, so an
