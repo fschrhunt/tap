@@ -1,8 +1,12 @@
 name: Release
 
-# A tag vX.Y.Z on main releases tap: the same checks as CI, archives for macOS and Linux with
+# A release tag vX.Y.Z releases tap: the same checks as CI, archives for macOS and Linux with
 # checksums and build provenance, notes from CHANGELOG.md, a Homebrew formula PR, and a
-# real install of the release on both systems. .github/release/release.sh asks Actions to make the tag.
+# real install of the release on both systems. .github/release/release.sh asks Actions to make the tag.#
+# CHANGELOG.md is an output. .github/release/release.sh starts this with
+# reviewed notes; the tag job adds them to CHANGELOG.md in a release commit on
+# top of main, tags that commit, and opens a pull request that brings the
+# changelog to main. The tag then runs the release with the same notes.
 on:
   push:
     tags: ['v*']
@@ -10,6 +14,10 @@ on:
     inputs:
       tag:
         description: Version to release, such as v1.0.0
+        required: true
+        type: string
+      notes:
+        description: Release notes, as Markdown
         required: true
         type: string
 
@@ -35,10 +43,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           TAG: ${{ inputs.tag }}
+          NOTES: ${{ inputs.notes }}
         run: |
           test "$GITHUB_REF" = refs/heads/main || { echo 'Run releases from main.' >&2; exit 1; }
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag: $TAG" >&2; exit 1; }
-          grep -q "^## $TAG " CHANGELOG.md || { echo "CHANGELOG.md has no ## $TAG section" >&2; exit 1; }
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "$TAG already exists" >&2
             exit 1
@@ -48,8 +56,17 @@ jobs:
           [ "$result" = 'completed success' ] || { echo "CI on main ($commit) is '$result'; wait for it to pass." >&2; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md" || { echo 'The release notes are empty.' >&2; exit 1; }
+          .github/release/changelog.sh "$TAG" "$RUNNER_TEMP/notes.md"
+          git -c core.hooksPath=/dev/null commit -qm "release: $TAG" -- CHANGELOG.md
           git tag -a "$TAG" -m "$TAG"
-          GH_TOKEN="$RELEASE_TOKEN" git -c credential.helper= -c "credential.helper=!gh auth git-credential" push origin "$TAG"
+          # The release token's pushes start workflows: the tag runs the
+          # release, and the branch runs CI for the changelog's pull request.
+          GH_TOKEN="$RELEASE_TOKEN" git -c credential.helper= -c "credential.helper=!gh auth git-credential" \
+            push origin "refs/tags/$TAG" "HEAD:refs/heads/release/$TAG"
+          GH_TOKEN="$RELEASE_TOKEN" gh pr create --base main --head "release/$TAG" --title "release: $TAG" \
+            --body "Adds the $TAG notes to CHANGELOG.md. The $TAG tag already points at this commit; merge after CI passes."
 
   check:
     if: github.event_name == 'push'
@@ -62,11 +79,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
-      - name: The tag is on main and has notes
+      # A release tag points at its release commit: one commit on top of main
+      # that only adds the release's notes to CHANGELOG.md.
+      - name: The tag is a release commit on main with notes
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG is not on main" >&2; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA^" origin/main || { echo "$TAG is not a release commit on top of main" >&2; exit 1; }
+          [ "$(git diff --name-only "$GITHUB_SHA^" "$GITHUB_SHA")" = CHANGELOG.md ] || { echo "The $TAG release commit may only change CHANGELOG.md" >&2; exit 1; }
           grep -q "^## $TAG " CHANGELOG.md || { echo "CHANGELOG.md has no ## $TAG section" >&2; exit 1; }
       - run: ./x check
 
@@ -133,7 +153,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor "refs/tags/$TAG^{commit}" origin/main
+          git merge-base --is-ancestor "refs/tags/$TAG^{commit}^" origin/main
           latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
           test "$TAG" = "$latest" || { echo "Not the latest stable release; leaving the formula unchanged."; exit 0; }
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p checksums.txt -O "$RUNNER_TEMP/checksums.txt"

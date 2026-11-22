@@ -38,7 +38,8 @@ or modify a personal server config for tests.
 - `docs/`: user docs with examples; update them with any user-visible change.
 - `install.sh` and `tap.rb`: the checksum-verified installer and the Homebrew formula the
   release workflow regenerates; tap's repository is its own tap.
-- `.github/release/`: `release.sh` (name the changelog section, then dispatch Actions after CI passes),
+- `.github/release/`: `release.sh` (review the notes, then dispatch Actions after CI passes),
+  `changelog.sh` (the release commit's notes; never edit `CHANGELOG.md` by hand),
   `package.sh` (build archives), and the formula generator, PR helper and offline tests.
 - `assets/`: the logo, wordmark and lockup SVGs in black and white; see `assets/README.md`.
 
@@ -57,5 +58,5 @@ and lifecycle rationale. Omit comments that merely narrate clear names or code.
 Update comments and docs when behavior changes.
 
 Write one focused test per behavior change, using `testing`. Tests must be
-hermetic and offline. Add a CHANGELOG entry for user-visible changes.
+hermetic and offline. Release notes are written when releasing.
 Preserve unrelated changes and never expose secrets.
